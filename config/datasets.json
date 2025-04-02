@@ -1,0 +1,17 @@
+{
+    "NTIRE2025": {
+        "dataset_id": "okhater/NTIRE2025",
+        "source": "huggingface",
+        "description": "NTIRE2025 dataset details"
+    },
+    "LOLv2_synthetic": {
+        "dataset_id": "okhater/lolv2-synthetic",
+        "source": "huggingface",
+        "description": "LOLv2 synthetic dataset details"
+    },
+    "LOLv2_real": {
+        "dataset_id": "okhater/lolv2-real",
+        "source": "huggingface",
+        "description": "LOLv2 real dataset details"
+    }
+}
