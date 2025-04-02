@@ -1,3 +1,6 @@
 mlflow
 torch
 datasets
+scikit-image
+lpips
+pyiqa
