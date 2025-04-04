@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
 import frameworks.LightenDiffusion.utils as utils
+
 from frameworks.LightenDiffusion.models.unet import DiffusionUNet
 from frameworks.LightenDiffusion.models.decom import CTDN
 
@@ -136,47 +137,66 @@ class Net(nn.Module):
 
         return xs[-1]
 
-    def forward(self, inputs):
+    def forward(self, x, y=None):
+        """
+        Forward pass that supports both paired (x, y) and unpaired (x) data.
+        For paired data during training, x is the input and y is the ground truth.
+        In inference mode (or if y is None), only x is used.
+        """
         data_dict = {}
+        b = self.betas.to(x.device)
 
-        b = self.betas.to(inputs.device)
+        if self.training and y is not None:
+            # Process paired inputs: use x for conditioning and y as ground truth
+            output_x = self.decom(x, pred_fea=None)
+            output_y = self.decom(y, pred_fea=None)
 
-        if self.training:
-            output = self.decom(inputs, pred_fea=None)
-            low_R, low_L, low_fea, high_L = output["low_R"], output["low_L"], \
-                output["low_fea"], output["high_L"]
-            low_condition_norm = utils.data_transform(low_fea)
+            # Extract features from x and y respectively
+            low_R_x = output_x["low_R"]
+            low_L_x = output_x["low_L"]
+            low_fea_x = output_x["low_fea"]
+            high_L_x = output_x["high_L"]
 
-            t = torch.randint(low=0, high=self.num_timesteps, size=(low_condition_norm.shape[0] // 2 + 1,)).to(
-                self.device)
-            t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:low_condition_norm.shape[0]].to(inputs.device)
+            low_R_y = output_y["low_R"]
+            low_L_y = output_y["low_L"]
+
+            # Compute conditioning feature from x and reference feature from y
+            low_condition_norm = utils.data_transform(low_fea_x)
+            reference_fea = low_R_y * torch.pow(low_L_y, 0.2)
+
+            # Generate random timesteps for noise
+            t = torch.randint(low=0, high=self.num_timesteps, size=(low_condition_norm.shape[0] // 2 + 1,)).to(self.device)
+            t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:low_condition_norm.shape[0]].to(x.device)
             a = (1 - b).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1)
 
             e = torch.randn_like(low_condition_norm)
 
-            high_input_norm = utils.data_transform(low_R * high_L)
+            # Use x's features for input normalization
+            high_input_norm = utils.data_transform(low_R_x * high_L_x)
+            x_noise = high_input_norm * a.sqrt() + e * (1.0 - a).sqrt()
 
-            x = high_input_norm * a.sqrt() + e * (1.0 - a).sqrt()
-            noise_output = self.Unet(torch.cat([low_condition_norm, x], dim=1), t.float())
+            # Noise estimation using the UNet
+            noise_output = self.Unet(torch.cat([low_condition_norm, x_noise], dim=1), t.float())
 
+            # Predict features using sampling
             pred_fea = self.sample_training(low_condition_norm, b)
             pred_fea = utils.inverse_data_transform(pred_fea)
-            reference_fea = low_R * torch.pow(low_L, 0.2)
 
             data_dict["noise_output"] = noise_output
             data_dict["e"] = e
-
             data_dict["pred_fea"] = pred_fea
             data_dict["reference_fea"] = reference_fea
 
         else:
-            output = self.decom(inputs, pred_fea=None)
+            # In inference or unpaired mode, process x only.
+            output = self.decom(x, pred_fea=None)
             low_fea = output["low_fea"]
             low_condition_norm = utils.data_transform(low_fea)
 
             pred_fea = self.sample_training(low_condition_norm, b)
             pred_fea = utils.inverse_data_transform(pred_fea)
-            pred_x = self.decom(inputs, pred_fea=pred_fea)["pred_img"]
+            # Use the predicted features to obtain the final prediction
+            pred_x = self.decom(x, pred_fea=pred_fea)["pred_img"]
             data_dict["pred_x"] = pred_x
 
         return data_dict
@@ -209,13 +229,11 @@ class DenoisingDiffusion(object):
             self.ema_helper.ema(self.model)
         print("=> loaded checkpoint {} step {}".format(load_path, self.step))
 
-    def train(self, DATASET):
+    def train(self, train_loader, val_loader):
         cudnn.benchmark = True
-        train_loader, val_loader = DATASET.get_loaders()
-
         if os.path.isfile(self.args.resume):
             self.load_ddm_ckpt(self.args.resume)
-
+            
         for name, param in self.model.named_parameters():
             if "decom" in name:
                 param.requires_grad = False
@@ -227,13 +245,17 @@ class DenoisingDiffusion(object):
             data_start = time.time()
             data_time = 0
             for i, (x, y) in enumerate(train_loader):
-                x = x.flatten(start_dim=0, end_dim=1) if x.ndim == 5 else x
+                # Flatten the batch if the data has an extra dimension (e.g. multiple patches)
+                if x.ndim == 5:
+                    x = x.flatten(start_dim=0, end_dim=1)
+                    y = y.flatten(start_dim=0, end_dim=1)
                 self.model.train()
                 self.step += 1
 
                 x = x.to(self.device)
+                y = y.to(self.device)
 
-                output = self.model(x)
+                output = self.model(x, y)
 
                 noise_loss, scc_loss = self.noise_estimation_loss(output)
                 loss = noise_loss + scc_loss
@@ -241,9 +263,9 @@ class DenoisingDiffusion(object):
                 data_time += time.time() - data_start
 
                 if self.step % 10 == 0:
-                    print("step:{}, noise_loss:{:.5f} scc_loss:{:.5f} time:{:.5f}".
-                          format(self.step, noise_loss.item(),
-                                 scc_loss.item(), data_time / (i + 1)))
+                    print("step:{}, noise_loss:{:.5f} scc_loss:{:.5f} time:{:.5f}".format(
+                        self.step, noise_loss.item(), scc_loss.item(), data_time / (i + 1)
+                    ))
 
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -254,24 +276,21 @@ class DenoisingDiffusion(object):
                 if self.step % self.config.training.validation_freq == 0 and self.step != 0:
                     self.model.eval()
                     self.sample_validation_patches(val_loader, self.step)
-
-                    utils.logging.save_checkpoint({'step': self.step,
-                                                   'epoch': epoch + 1,
-                                                   'state_dict': self.model.state_dict(),
-                                                   'optimizer': self.optimizer.state_dict(),
-                                                   'ema_helper': self.ema_helper.state_dict(),
-                                                   'params': self.args,
-                                                   'config': self.config},
-                                                  filename=os.path.join(self.config.data.ckpt_dir, 'model_latest'))
+                    utils.logging.save_checkpoint({
+                        'step': self.step,
+                        'epoch': epoch + 1,
+                        'state_dict': self.model.state_dict(),
+                        'optimizer': self.optimizer.state_dict(),
+                        'ema_helper': self.ema_helper.state_dict(),
+                        'params': self.args,
+                        'config': self.config
+                    }, filename=os.path.join(self.config.data.ckpt_dir, 'model_latest'))
 
     def noise_estimation_loss(self, output):
         pred_fea, reference_fea = output["pred_fea"], output["reference_fea"]
         noise_output, e = output["noise_output"], output["e"]
-        # ==================noise loss==================
         noise_loss = self.l2_loss(noise_output, e)
-        # ==================scc loss==================
         scc_loss = 0.001 * self.l1_loss(pred_fea, reference_fea)
-
         return noise_loss, scc_loss
 
     def sample_validation_patches(self, val_loader, step):
@@ -287,5 +306,6 @@ class DenoisingDiffusion(object):
                 img_h_64 = int(64 * np.ceil(img_h / 64.0))
                 img_w_64 = int(64 * np.ceil(img_w / 64.0))
                 x = F.pad(x, (0, img_w_64 - img_w, 0, img_h_64 - img_h), 'reflect')
+                # For validation, we assume only x is used for inference.
                 pred_x = self.model(x.to(self.device))["pred_x"][:, :, :img_h, :img_w]
                 utils.logging.save_image(pred_x, os.path.join(image_folder, str(step), '{}'.format(y[0])))

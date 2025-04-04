@@ -137,12 +137,9 @@ class feature_pyramid(nn.Module):
 class ReconNet(nn.Module):
     def __init__(self, channels):
         super(ReconNet, self).__init__()
-
         self.pyramid = feature_pyramid(channels)
-
         self.channel_down = channel_down(channels)
         self.channel_up = channel_up(channels)
-
         self.block_up0 = Res_block(channels * 4, channels * 4)
         self.block_up1 = Res_block(channels * 4, channels * 4)
         self.up_sampling0 = upsampling(channels * 4, channels * 2)
@@ -152,38 +149,34 @@ class ReconNet(nn.Module):
         self.block_up4 = Res_block(channels, channels)
         self.block_up5 = Res_block(channels, channels)
         self.up_sampling2 = upsampling(channels, channels)
-
-        self.conv2 = nn.Conv2d(channels, channels, kernel_size=(3, 3), stride=(1, 1), padding=1)
-        self.conv3 = nn.Conv2d(channels, 3, kernel_size=(1, 1), stride=(1, 1), padding=0)
-
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1)
+        self.conv3 = nn.Conv2d(channels, 3, kernel_size=1, stride=1, padding=0)
         self.relu = nn.LeakyReLU()
 
     def forward(self, x, pred_fea=None):
-
+        """
+        For feature extraction (pred_fea is None), process a single 3-channel image
+        and return features (used later for decomposition).
+        For reconstruction (pred_fea provided), condition on x and use the provided
+        features to generate a prediction.
+        """
         if pred_fea is None:
-            low_fea_down2, low_fea_down4, low_fea_down8 = self.pyramid(x[:, :3, ...])
+            # Process x through the pyramid and channel-down layers.
+            low_fea_down2, low_fea_down4, low_fea_down8 = self.pyramid(x)
             low_fea_down8 = self.channel_down(low_fea_down8)
-
-            high_fea_down2, high_fea_down4, high_fea_down8 = self.pyramid(x[:, 3:, ...])
-            high_fea_down8 = self.channel_down(high_fea_down8)
-
-            return low_fea_down8, high_fea_down8
+            # Return the same features for both branches.
+            return low_fea_down8, low_fea_down8
         else:
-            # =================low ori decoder=================
-            low_fea_down2, low_fea_down4, low_fea_down8 = self.pyramid(x[:, :3, ...])
-
+            # Reconstruction branch.
+            low_fea_down2, low_fea_down4, low_fea_down8 = self.pyramid(x)
+            low_fea_down8 = self.channel_down(low_fea_down8)
             pred_fea = self.channel_up(pred_fea)
-
-            pred_fea_up2 = self.up_sampling0(
-                self.block_up1(self.block_up0(pred_fea) + low_fea_down8))
-            pred_fea_up4 = self.up_sampling1(
-                self.block_up3(self.block_up2(pred_fea_up2) + low_fea_down4))
-            pred_fea_up8 = self.up_sampling2(
-                self.block_up5(self.block_up4(pred_fea_up4) + low_fea_down2))
-
+            pred_fea_up2 = self.up_sampling0(self.block_up1(self.block_up0(pred_fea) + low_fea_down8))
+            pred_fea_up4 = self.up_sampling1(self.block_up3(self.block_up2(pred_fea_up2) + low_fea_down4))
+            pred_fea_up8 = self.up_sampling2(self.block_up5(self.block_up4(pred_fea_up4) + low_fea_down2))
             pred_img = self.conv3(self.relu(self.conv2(pred_fea_up8)))
-
             return pred_img
+
 
 
 class Self_Attention(nn.Module):
@@ -272,70 +265,97 @@ class Cross_Attention(nn.Module):
 class Retinex_decom(nn.Module):
     def __init__(self, channels):
         super(Retinex_decom, self).__init__()
-
-        self.conv0 = nn.Conv2d(3, channels, kernel_size=(3, 3), stride=(1, 1), padding=1)
-        self.blocks0 = nn.Sequential(Res_block(channels, channels),
-                                     Res_block(channels, channels))
-
-        self.conv1 = nn.Conv2d(1, channels, kernel_size=(3, 3), stride=(1, 1), padding=1)
-        self.blocks1 = nn.Sequential(Res_block(channels, channels),
-                                     Res_block(channels, channels))
-
+        self.conv0 = nn.Conv2d(3, channels, kernel_size=3, stride=1, padding=1)
+        self.blocks0 = nn.Sequential(
+            Res_block(channels, channels),
+            Res_block(channels, channels)
+        )
+        self.conv1 = nn.Conv2d(1, channels, kernel_size=3, stride=1, padding=1)
+        self.blocks1 = nn.Sequential(
+            Res_block(channels, channels),
+            Res_block(channels, channels)
+        )
         self.cross_attention = Cross_Attention(dim=channels, num_heads=8)
         self.self_attention = Self_Attention(dim=channels, num_heads=8, bias=True)
-
-        self.conv0_1 = nn.Sequential(Res_block(channels, channels),
-                                     nn.Conv2d(channels, 3, kernel_size=(3, 3), stride=(1, 1), padding=1))
-        self.conv1_1 = nn.Sequential(Res_block(channels, channels),
-                                     nn.Conv2d(channels, 1, kernel_size=(3, 3), stride=(1, 1), padding=1))
+        self.conv0_1 = nn.Sequential(
+            Res_block(channels, channels),
+            nn.Conv2d(channels, 3, kernel_size=3, stride=1, padding=1)
+        )
+        self.conv1_1 = nn.Sequential(
+            Res_block(channels, channels),
+            nn.Conv2d(channels, 1, kernel_size=3, stride=1, padding=1)
+        )
 
     def forward(self, x):
+        """
+        Decompose the 3-channel input image x into reflectance (R) and illumination (L).
+        """
         init_illumination = torch.max(x, dim=1, keepdim=True)[0]
-        init_reflectance = x / init_illumination
-
-        Reflectance, Illumination = (self.blocks0(self.conv0(init_reflectance)),
-                                     self.blocks1(self.conv1(init_illumination)))
-
+        init_reflectance = x / (init_illumination + 1e-6)  # Avoid division by zero.
+        Reflectance = self.blocks0(self.conv0(init_reflectance))
+        Illumination = self.blocks1(self.conv1(init_illumination))
         Reflectance_final = self.cross_attention(Illumination, Reflectance)
-
         Illumination_content = self.self_attention(Illumination)
-
         Reflectance_final = self.conv0_1(Reflectance_final + Illumination_content)
         Illumination_final = self.conv1_1(Illumination - Illumination_content)
-
         R = torch.sigmoid(Reflectance_final)
         L = torch.sigmoid(Illumination_final)
-        L = torch.cat([L for i in range(3)], dim=1)
-
+        L = torch.cat([L] * 3, dim=1)
         return R, L
+
 
 
 class CTDN(nn.Module):
     def __init__(self, channels=64):
         super(CTDN, self).__init__()
-
         self.ReconNet = ReconNet(channels)
         self.retinex = Retinex_decom(channels)
 
     def forward(self, images, pred_fea=None):
+        """
+        Forward pass for CTDN.
 
+        Parameters:
+            images: In unpaired mode, a tensor of shape (B, 3, H, W);
+                    in paired mode, a tuple (x, y) where x and y are tensors of shape (B, 3, H, W).
+            pred_fea: If provided, triggers the reconstruction branch using x and the given feature.
+
+        Returns:
+            If pred_fea is None (decomposition mode): 
+                A dictionary containing the decomposition features from the input x and, if available, 
+                from the ground truth y under keys:
+                    - "low_R", "low_L", "low_fea"  (from x)
+                    - "gt_low_R", "gt_low_L", "gt_low_fea"  (from y, if paired)
+            Else (reconstruction mode):
+                A dictionary with key "pred_img" holding the reconstructed image.
+        """
         output = {}
-        # =================decomposition low=================
-        if pred_fea is None:
-            low_fea_down8, high_fea_down8 = self.ReconNet(images, pred_fea=None)
-
-            low_R, low_L = self.retinex(low_fea_down8)
-            high_R, high_L = self.retinex(high_fea_down8)
-
-            output["low_R"] = low_R
-            output["low_L"] = low_L
-            output["low_fea"] = low_fea_down8
-            output["high_R"] = high_R
-            output["high_L"] = high_L
-            output["high_fea"] = high_fea_down8
-
+        # Determine if we are in paired mode by checking if images is a tuple.
+        if isinstance(images, (tuple, list)):
+            x, y = images
         else:
-            pred_img = self.ReconNet(images[:, :3, ...], pred_fea=pred_fea)
+            x = images
+            y = None
+
+        if pred_fea is None:
+            # Decomposition branch: decompose the input image x.
+            low_fea_x, _ = self.ReconNet(x, pred_fea=None)
+            low_R_x, low_L_x = self.retinex(low_fea_x)
+            output["low_R"] = low_R_x
+            output["low_L"] = low_L_x
+            output["low_fea"] = low_fea_x
+
+            # If paired data is provided, also decompose the ground-truth image y.
+            if y is not None:
+                low_fea_y, _ = self.ReconNet(y, pred_fea=None)
+                low_R_y, low_L_y = self.retinex(low_fea_y)
+                output["gt_low_R"] = low_R_y
+                output["gt_low_L"] = low_L_y
+                output["gt_low_fea"] = low_fea_y
+        else:
+            # Reconstruction branch: use x (the input image) and the provided features to reconstruct.
+            pred_img = self.ReconNet(x, pred_fea=pred_fea)
             output["pred_img"] = pred_img
 
         return output
+

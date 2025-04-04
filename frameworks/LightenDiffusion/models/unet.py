@@ -201,7 +201,8 @@ class DiffusionUNet(nn.Module):
         ch, out_ch, ch_mult = config.model.ch, config.model.out_ch, tuple(config.model.ch_mult)
         num_res_blocks = config.model.num_res_blocks
         dropout = config.model.dropout
-        in_channels = config.model.in_channels * 2 if config.data.conditional else config.model.in_channels
+        in_channels = config.model.in_channels
+        self.conditional = config.data.conditional
         resamp_with_conv = config.model.resamp_with_conv
 
         self.ch = ch
@@ -293,9 +294,19 @@ class DiffusionUNet(nn.Module):
                                         stride=1,
                                         padding=1)
 
-    def forward(self, x, t):
-        # assert x.shape[2] == x.shape[3] == self.resolution
-
+    def forward(self, x, t, condition=None):
+        """
+        Forward pass with optional conditioning
+        
+        Args:
+            x (Tensor): Input tensor
+            t (Tensor): Timestep tensor
+            condition (Tensor, optional): Conditioning tensor for conditional generation
+        """
+        # If we have a condition, concatenate it with the input
+        if condition is not None and self.conditional:
+            x = torch.cat([condition, x], dim=1)
+        
         # timestep embedding
         temb = get_timestep_embedding(t, self.ch)
         temb = self.temb.dense[0](temb)
