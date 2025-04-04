@@ -5,7 +5,7 @@ import os
 import math
 import torch.nn.functional as F
 from einops import rearrange
-
+from typing import Optional, Tuple
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -305,57 +305,31 @@ class Retinex_decom(nn.Module):
 
 
 
+
 class CTDN(nn.Module):
-    def __init__(self, channels=64):
+    def __init__(self, channels: int = 64) -> None:
         super(CTDN, self).__init__()
         self.ReconNet = ReconNet(channels)
         self.retinex = Retinex_decom(channels)
 
-    def forward(self, images, pred_fea=None):
+    def forward(self, images: torch.Tensor, pred_fea: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass for CTDN.
 
         Parameters:
-            images: In unpaired mode, a tensor of shape (B, 3, H, W);
-                    in paired mode, a tuple (x, y) where x and y are tensors of shape (B, 3, H, W).
-            pred_fea: If provided, triggers the reconstruction branch using x and the given feature.
+            images: A tensor of shape (B, 3, H, W) representing the low-light image.
+            pred_fea: If provided, triggers the reconstruction branch.
 
         Returns:
-            If pred_fea is None (decomposition mode): 
-                A dictionary containing the decomposition features from the input x and, if available, 
-                from the ground truth y under keys:
-                    - "low_R", "low_L", "low_fea"  (from x)
-                    - "gt_low_R", "gt_low_L", "gt_low_fea"  (from y, if paired)
-            Else (reconstruction mode):
-                A dictionary with key "pred_img" holding the reconstructed image.
+            In decomposition mode (pred_fea is None), returns a tuple:
+                (estimated_reflectance, estimated_illumination)
+            In reconstruction mode, it returns the reconstructed image.
         """
-        output = {}
-        # Determine if we are in paired mode by checking if images is a tuple.
-        if isinstance(images, (tuple, list)):
-            x, y = images
-        else:
-            x = images
-            y = None
-
         if pred_fea is None:
-            # Decomposition branch: decompose the input image x.
-            low_fea_x, _ = self.ReconNet(x, pred_fea=None)
-            low_R_x, low_L_x = self.retinex(low_fea_x)
-            output["low_R"] = low_R_x
-            output["low_L"] = low_L_x
-            output["low_fea"] = low_fea_x
-
-            # If paired data is provided, also decompose the ground-truth image y.
-            if y is not None:
-                low_fea_y, _ = self.ReconNet(y, pred_fea=None)
-                low_R_y, low_L_y = self.retinex(low_fea_y)
-                output["gt_low_R"] = low_R_y
-                output["gt_low_L"] = low_L_y
-                output["gt_low_fea"] = low_fea_y
+            low_features, _ = self.ReconNet(images, pred_fea=None)
+            estimated_reflectance, estimated_illumination = self.retinex(low_features)
+            return estimated_reflectance, estimated_illumination
         else:
-            # Reconstruction branch: use x (the input image) and the provided features to reconstruct.
-            pred_img = self.ReconNet(x, pred_fea=pred_fea)
-            output["pred_img"] = pred_img
-
-        return output
+            pred_img = self.ReconNet(images, pred_fea=pred_fea)
+            return pred_img
 
