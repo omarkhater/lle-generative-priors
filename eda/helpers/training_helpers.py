@@ -138,10 +138,11 @@ def validate_model(
     model.eval()
     running_val_loss = 0.0
     with torch.no_grad():
-        for inputs, _ in val_loader: 
-            batch_size = inputs.shape[0]
-            inputs = inputs.reshape(batch_size, -1).to(device)
-            loss = criterion(model, inputs)
+        for inputs, targets in val_loader: 
+            inputs = inputs.to(device)
+            targets = targets.to(device)
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
             running_val_loss += loss.item()
     avg_val_loss = running_val_loss / len(val_loader)
     return avg_val_loss
