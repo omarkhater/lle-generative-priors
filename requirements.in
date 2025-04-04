@@ -4,3 +4,4 @@ datasets
 scikit-image
 lpips
 pyiqa
+torchsummary
