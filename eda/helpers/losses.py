@@ -73,5 +73,24 @@ def ctdn_loss_wrapper(
     outputs: Tuple[torch.Tensor, torch.Tensor],
     target_raw: torch.Tensor
 ) -> torch.Tensor:
+    """
+    Wrapper for ctdn_loss function to handle model outputs.
+    
+    Args:
+        outputs: A tuple of (estimated_reflectance, estimated_illumination).
+        target_raw: Target raw/normal-light image tensor.
+        
+    Returns:
+        A scalar tensor representing the total loss.
+    """
     estimated_reflectance, estimated_illumination = outputs
+    
+    if estimated_reflectance.shape[2:] != target_raw.shape[2:]:
+        estimated_reflectance = F.interpolate(
+            estimated_reflectance, size=target_raw.shape[2:], mode='bilinear', align_corners=False
+        )
+        estimated_illumination = F.interpolate(
+            estimated_illumination, size=target_raw.shape[2:], mode='bilinear', align_corners=False
+        )
+    
     return ctdn_loss(estimated_reflectance, estimated_illumination, target_raw)

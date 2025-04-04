@@ -303,9 +303,6 @@ class Retinex_decom(nn.Module):
         L = torch.cat([L] * 3, dim=1)
         return R, L
 
-
-
-
 class CTDN(nn.Module):
     def __init__(self, channels: int = 64) -> None:
         super(CTDN, self).__init__()
