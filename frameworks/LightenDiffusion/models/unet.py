@@ -195,29 +195,50 @@ class AttnBlock(nn.Module):
 
 
 class DiffusionUNet(nn.Module):
-    def __init__(self, config):
+    def __init__(self, 
+                 in_channels=3,
+                 out_channels=3,
+                 ch=128,
+                 ch_mult=(1, 2, 2, 2),
+                 num_res_blocks=2,
+                 dropout=0.1,
+                 conditional=True,
+                 resamp_with_conv=True,
+                 device="cuda"):
+        """
+        Initialize a DiffusionUNet model.
+        
+        Args:
+            in_channels (int): Number of input channels
+            out_channels (int): Number of output channels
+            ch (int): Base channel count
+            ch_mult (tuple): Channel multiplier for each resolution
+            num_res_blocks (int): Number of residual blocks per resolution
+            dropout (float): Dropout rate
+            conditional (bool): Whether the model is conditional
+            resamp_with_conv (bool): Whether to use convolution for resampling
+            device (str): Device to use
+        """
         super().__init__()
-        self.config = config
-        ch, out_ch, ch_mult = config.model.ch, config.model.out_ch, tuple(config.model.ch_mult)
-        num_res_blocks = config.model.num_res_blocks
-        dropout = config.model.dropout
-        in_channels = config.model.in_channels
-        self.conditional = config.data.conditional
-        resamp_with_conv = config.model.resamp_with_conv
-
+        
+        self.in_channels = in_channels
+        self.out_channels = out_channels
         self.ch = ch
+        self.ch_mult = ch_mult
+        self.num_res_blocks = num_res_blocks
+        self.dropout = dropout
+        self.conditional = conditional
+        self.resamp_with_conv = resamp_with_conv
+        self.device = device
+        
         self.temb_ch = self.ch*4
         self.num_resolutions = len(ch_mult)
-        self.num_res_blocks = num_res_blocks
-        self.in_channels = in_channels
 
         # timestep embedding
         self.temb = nn.Module()
         self.temb.dense = nn.ModuleList([
-            torch.nn.Linear(self.ch,
-                            self.temb_ch),
-            torch.nn.Linear(self.temb_ch,
-                            self.temb_ch),
+            torch.nn.Linear(self.ch, self.temb_ch),
+            torch.nn.Linear(self.temb_ch, self.temb_ch),
         ])
 
         # downsampling
@@ -227,7 +248,7 @@ class DiffusionUNet(nn.Module):
                                        stride=1,
                                        padding=1)
 
-        in_ch_mult = (1,)+ch_mult
+        in_ch_mult = (1,) + ch_mult
         self.down = nn.ModuleList()
         block_in = None
         for i_level in range(self.num_resolutions):
@@ -289,7 +310,7 @@ class DiffusionUNet(nn.Module):
         # end
         self.norm_out = Normalize(block_in)
         self.conv_out = torch.nn.Conv2d(block_in,
-                                        out_ch,
+                                        self.out_channels,
                                         kernel_size=3,
                                         stride=1,
                                         padding=1)

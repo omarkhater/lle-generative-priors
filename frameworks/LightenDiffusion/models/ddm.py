@@ -78,24 +78,75 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
 
 
 class Net(nn.Module):
-    def __init__(self, args, config):
+    def __init__(self, 
+                 mode='inference',
+                 device='cuda',
+                 beta_schedule='linear',
+                 beta_start=0.0001,
+                 beta_end=0.02,
+                 num_diffusion_timesteps=1000,
+                 num_sampling_timesteps=100,
+                 in_channels=3,
+                 out_channels=3,
+                 ch=128,
+                 ch_mult=(1, 2, 2, 2),
+                 num_res_blocks=2,
+                 dropout=0.1,
+                 conditional=True,
+                 resamp_with_conv=True,
+                 stage1_path='ckpt/stage1'):
+        """
+        Initialize the diffusion model.
+        
+        Args:
+            mode (str): 'training' or 'inference'
+            device (str): Device to use ('cuda' or 'cpu')
+            beta_schedule (str): Type of beta schedule ('linear', 'quad', etc.)
+            beta_start (float): Starting value for beta schedule
+            beta_end (float): Ending value for beta schedule
+            num_diffusion_timesteps (int): Number of diffusion timesteps
+            num_sampling_timesteps (int): Number of sampling timesteps
+            in_channels (int): Number of input channels
+            out_channels (int): Number of output channels
+            ch (int): Base channel count
+            ch_mult (tuple): Channel multiplier for each resolution
+            num_res_blocks (int): Number of residual blocks per resolution
+            dropout (float): Dropout rate
+            conditional (bool): Whether the model is conditional
+            resamp_with_conv (bool): Whether to use convolution for resampling
+            stage1_path (str): Path to stage1 weights
+        """
         super(Net, self).__init__()
 
-        self.args = args
-        self.config = config
-        self.device = config.device
-
-        self.Unet = DiffusionUNet(config)
-        if self.args.mode == 'training':
-            self.decom = self.load_stage1(CTDN(), 'ckpt/stage1')
+        self.mode = mode
+        self.device = device
+        self.conditional = conditional
+        self.num_sampling_timesteps = num_sampling_timesteps
+        self.num_diffusion_timesteps = num_diffusion_timesteps
+        
+        # Initialize UNet with explicit parameters
+        self.Unet = DiffusionUNet(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            ch=ch,
+            ch_mult=ch_mult,
+            num_res_blocks=num_res_blocks,
+            dropout=dropout,
+            conditional=conditional,
+            resamp_with_conv=resamp_with_conv,
+            device=device
+        )
+        
+        if self.mode == 'training':
+            self.decom = self.load_stage1(CTDN(), stage1_path)
         else:
             self.decom = CTDN()
 
         betas = get_beta_schedule(
-            beta_schedule=config.diffusion.beta_schedule,
-            beta_start=config.diffusion.beta_start,
-            beta_end=config.diffusion.beta_end,
-            num_diffusion_timesteps=config.diffusion.num_diffusion_timesteps,
+            beta_schedule=beta_schedule,
+            beta_start=beta_start,
+            beta_end=beta_end,
+            num_diffusion_timesteps=num_diffusion_timesteps,
         )
 
         self.betas = torch.from_numpy(betas).float()
@@ -114,27 +165,40 @@ class Net(nn.Module):
         return model
 
     def sample_training(self, x_cond, b, eta=0.):
-        skip = self.config.diffusion.num_diffusion_timesteps // self.config.diffusion.num_sampling_timesteps
-        seq = range(0, self.config.diffusion.num_diffusion_timesteps, skip)
+        """
+        Sample from the diffusion model during training or inference.
+        
+        Args:
+            x_cond (Tensor): Low-light image features for conditioning
+            b (Tensor): Beta schedule
+            eta (float): Noise level parameter
+            
+        Returns:
+            Tensor: Final prediction
+        """
+        skip = self.num_diffusion_timesteps // self.num_sampling_timesteps
+        seq = range(0, self.num_diffusion_timesteps, skip)
         n, c, h, w = x_cond.shape
         seq_next = [-1] + list(seq[:-1])
         x = torch.randn(n, c, h, w, device=self.device)
         xs = [x]
+        
         for i, j in zip(reversed(seq), reversed(seq_next)):
             t = (torch.ones(n) * i).to(x.device)
             next_t = (torch.ones(n) * j).to(x.device)
             at = self.compute_alpha(b, t.long())
             at_next = self.compute_alpha(b, next_t.long())
             xt = xs[-1].to(x.device)
-
+            
+            # Pass condition as a separate parameter
             et = self.Unet(torch.cat([x_cond, xt], dim=1), t)
+            
             x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
-
             c1 = eta * ((1 - at / at_next) * (1 - at_next) / (1 - at)).sqrt()
             c2 = ((1 - at_next) - c1 ** 2).sqrt()
             xt_next = at_next.sqrt() * x0_t + c1 * torch.randn_like(x) + c2 * et
             xs.append(xt_next.to(x.device))
-
+            
         return xs[-1]
 
     def forward(self, x, y=None):
@@ -203,36 +267,182 @@ class Net(nn.Module):
 
 
 class DenoisingDiffusion(object):
-    def __init__(self, args, config):
+    def __init__(self, 
+                 mode='inference',
+                 device='cuda',
+                 ema_decay=0.9999,
+                 beta_schedule='linear',
+                 beta_start=0.0001,
+                 beta_end=0.02,
+                 num_diffusion_timesteps=1000,
+                 num_sampling_timesteps=100,
+                 in_channels=3,
+                 out_channels=3,
+                 ch=128,
+                 ch_mult=(1, 2, 2, 2),
+                 num_res_blocks=2,
+                 dropout=0.1,
+                 conditional=True,
+                 resamp_with_conv=True,
+                 stage1_path='ckpt/stage1',
+                 ckpt_dir='ckpt',
+                 optimizer_type='Adam',
+                 optimizer_lr=2e-4,
+                 optimizer_betas=(0.9, 0.999),
+                 optimizer_weight_decay=0,
+                 optimizer_eps=1e-8,
+                 resume_path=None):
+        """
+        Initialize the denoising diffusion model.
+        
+        Args:
+            mode (str): 'training' or 'inference'
+            device (str): Device to use ('cuda' or 'cpu')
+            ema_decay (float): EMA decay rate
+            beta_schedule (str): Type of beta schedule ('linear', 'quad', etc.)
+            beta_start (float): Starting value for beta schedule
+            beta_end (float): Ending value for beta schedule
+            num_diffusion_timesteps (int): Number of diffusion timesteps
+            num_sampling_timesteps (int): Number of sampling timesteps
+            in_channels (int): Number of input channels
+            out_channels (int): Number of output channels
+            ch (int): Base channel count
+            ch_mult (tuple): Channel multiplier for each resolution
+            num_res_blocks (int): Number of residual blocks per resolution
+            dropout (float): Dropout rate
+            conditional (bool): Whether the model is conditional
+            resamp_with_conv (bool): Whether to use convolution for resampling
+            stage1_path (str): Path to stage1 weights
+            ckpt_dir (str): Directory to save checkpoints
+            optimizer_type (str): Type of optimizer ('Adam', 'AdamW', etc.)
+            optimizer_lr (float): Learning rate for optimizer
+            optimizer_betas (tuple): Betas for Adam optimizer
+            optimizer_weight_decay (float): Weight decay for optimizer
+            optimizer_eps (float): Epsilon for optimizer
+            resume_path (str): Path to resume training from checkpoint
+        """
         super().__init__()
-        self.args = args
-        self.config = config
-        self.device = config.device
-
-        self.model = Net(args, config)
-        self.model.to(self.device)
+        self.mode = mode
+        self.device = device
+        self.ckpt_dir = ckpt_dir
+        self.resume_path = resume_path
+        
+        # Initialize the model with explicit parameters
+        self.model = Net(
+            mode=mode,
+            device=device,
+            beta_schedule=beta_schedule,
+            beta_start=beta_start,
+            beta_end=beta_end,
+            num_diffusion_timesteps=num_diffusion_timesteps,
+            num_sampling_timesteps=num_sampling_timesteps,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            ch=ch,
+            ch_mult=ch_mult,
+            num_res_blocks=num_res_blocks,
+            dropout=dropout,
+            conditional=conditional,
+            resamp_with_conv=resamp_with_conv,
+            stage1_path=stage1_path
+        )
+        
+        self.model.to(device)
         self.model = torch.nn.DataParallel(self.model, device_ids=range(torch.cuda.device_count()))
 
-        self.ema_helper = EMAHelper()
+        self.ema_helper = EMAHelper(mu=ema_decay)
         self.ema_helper.register(self.model)
 
         self.l2_loss = torch.nn.MSELoss()
         self.l1_loss = torch.nn.L1Loss()
-
-        self.optimizer = utils.optimize.get_optimizer(self.config, self.model.parameters())
+        
+        # Create optimizer with explicit parameters
+        self.optimizer = self._get_optimizer(
+            optimizer_type=optimizer_type,
+            lr=optimizer_lr,
+            betas=optimizer_betas,
+            weight_decay=optimizer_weight_decay,
+            eps=optimizer_eps
+        )
+        
         self.start_epoch, self.step = 0, 0
+        
+        # Load checkpoint if resume path is provided
+        if resume_path and os.path.isfile(resume_path):
+            self.load_ddm_ckpt(resume_path)
+
+    def _get_optimizer(self, optimizer_type='Adam', lr=2e-4, betas=(0.9, 0.999), 
+                      weight_decay=0, eps=1e-8):
+        """
+        Create an optimizer for model parameters.
+        
+        Args:
+            optimizer_type (str): Type of optimizer ('Adam', 'AdamW', etc.)
+            lr (float): Learning rate
+            betas (tuple): Beta parameters for Adam optimizer
+            weight_decay (float): Weight decay parameter
+            eps (float): Epsilon parameter
+            
+        Returns:
+            torch.optim.Optimizer: The created optimizer
+        """
+        if optimizer_type == 'Adam':
+            return torch.optim.Adam(
+                self.model.parameters(),
+                lr=lr,
+                betas=betas,
+                weight_decay=weight_decay,
+                eps=eps
+            )
+        elif optimizer_type == 'AdamW':
+            return torch.optim.AdamW(
+                self.model.parameters(),
+                lr=lr,
+                betas=betas,
+                weight_decay=weight_decay,
+                eps=eps
+            )
+        else:
+            raise NotImplementedError(f"Optimizer {optimizer_type} not implemented")
 
     def load_ddm_ckpt(self, load_path, ema=False):
+        """
+        Load checkpoint from the given path.
+        
+        Args:
+            load_path (str): Path to the checkpoint file
+            ema (bool): Whether to apply EMA on the loaded model
+        """
         checkpoint = utils.logging.load_checkpoint(load_path, None)
         self.model.load_state_dict(checkpoint['state_dict'], strict=True)
+        
+        # Load optimizer and other training state if available
+        if 'optimizer' in checkpoint and self.mode == 'training':
+            self.optimizer.load_state_dict(checkpoint['optimizer'])
+        if 'step' in checkpoint:
+            self.step = checkpoint['step']
+        if 'epoch' in checkpoint:
+            self.start_epoch = checkpoint['epoch']
+        if 'ema_helper' in checkpoint:
+            self.ema_helper.load_state_dict(checkpoint['ema_helper'])
+            
         if ema:
             self.ema_helper.ema(self.model)
-        print("=> loaded checkpoint {} step {}".format(load_path, self.step))
+            
+        print(f"=> loaded checkpoint {load_path} (step {self.step})")
 
-    def train(self, train_loader, val_loader):
+    def train(self, train_loader, val_loader, n_epochs=100, validation_freq=1000, image_folder='results'):
+        """
+        Train the diffusion model.
+        
+        Args:
+            train_loader: DataLoader for training data
+            val_loader: DataLoader for validation data
+            n_epochs (int): Number of epochs to train
+            validation_freq (int): Frequency of validation in steps
+            image_folder (str): Folder to save validation images
+        """
         cudnn.benchmark = True
-        if os.path.isfile(self.args.resume):
-            self.load_ddm_ckpt(self.args.resume)
             
         for name, param in self.model.named_parameters():
             if "decom" in name:
@@ -240,7 +450,7 @@ class DenoisingDiffusion(object):
             else:
                 param.requires_grad = True
 
-        for epoch in range(self.start_epoch, self.config.training.n_epochs):
+        for epoch in range(self.start_epoch, n_epochs):
             print('epoch: ', epoch)
             data_start = time.time()
             data_time = 0
@@ -263,9 +473,7 @@ class DenoisingDiffusion(object):
                 data_time += time.time() - data_start
 
                 if self.step % 10 == 0:
-                    print("step:{}, noise_loss:{:.5f} scc_loss:{:.5f} time:{:.5f}".format(
-                        self.step, noise_loss.item(), scc_loss.item(), data_time / (i + 1)
-                    ))
+                    print(f"step:{self.step}, noise_loss:{noise_loss.item():.5f} scc_loss:{scc_loss.item():.5f} time:{data_time / (i + 1):.5f}")
 
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -273,18 +481,16 @@ class DenoisingDiffusion(object):
                 self.ema_helper.update(self.model)
                 data_start = time.time()
 
-                if self.step % self.config.training.validation_freq == 0 and self.step != 0:
+                if self.step % validation_freq == 0 and self.step != 0:
                     self.model.eval()
-                    self.sample_validation_patches(val_loader, self.step)
+                    self.sample_validation_patches(val_loader, self.step, image_folder)
                     utils.logging.save_checkpoint({
                         'step': self.step,
                         'epoch': epoch + 1,
                         'state_dict': self.model.state_dict(),
                         'optimizer': self.optimizer.state_dict(),
-                        'ema_helper': self.ema_helper.state_dict(),
-                        'params': self.args,
-                        'config': self.config
-                    }, filename=os.path.join(self.config.data.ckpt_dir, 'model_latest'))
+                        'ema_helper': self.ema_helper.state_dict()
+                    }, filename=os.path.join(self.ckpt_dir, 'model_latest'))
 
     def noise_estimation_loss(self, output):
         pred_fea, reference_fea = output["pred_fea"], output["reference_fea"]
@@ -293,13 +499,22 @@ class DenoisingDiffusion(object):
         scc_loss = 0.001 * self.l1_loss(pred_fea, reference_fea)
         return noise_loss, scc_loss
 
-    def sample_validation_patches(self, val_loader, step):
-        image_folder = os.path.join(self.args.image_folder,
-                                    self.config.data.type + str(self.config.data.patch_size))
+    def sample_validation_patches(self, val_loader, step, image_folder='results'):
+        """
+        Sample validation patches and save the results.
+        
+        Args:
+            val_loader: DataLoader for validation data
+            step (int): Current training step
+            image_folder (str): Folder to save validation images
+        """
+        output_folder = os.path.join(image_folder, str(step))
+        os.makedirs(output_folder, exist_ok=True)
+        
         self.model.eval()
 
         with torch.no_grad():
-            print('Performing validation at step: {}'.format(step))
+            print(f'Performing validation at step: {step}')
             for i, (x, y) in enumerate(val_loader):
                 b, _, img_h, img_w = x.shape
 
@@ -308,4 +523,6 @@ class DenoisingDiffusion(object):
                 x = F.pad(x, (0, img_w_64 - img_w, 0, img_h_64 - img_h), 'reflect')
                 # For validation, we assume only x is used for inference.
                 pred_x = self.model(x.to(self.device))["pred_x"][:, :, :img_h, :img_w]
-                utils.logging.save_image(pred_x, os.path.join(image_folder, str(step), '{}'.format(y[0])))
+                
+                filename = y[0] if isinstance(y[0], str) else f"sample_{i}"
+                utils.logging.save_image(pred_x, os.path.join(output_folder, filename))
