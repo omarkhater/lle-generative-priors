@@ -11,7 +11,14 @@ class DatasetRegistry:
         # Structure: { dataset_name: { split_name: PyTorchDataset, ... }, ... }
         self.datasets = {}
 
-    def register_dataset(self, name: str, dataset_id: str, splits: list = ['train'], dataset_type: str = "paired"):
+    def register_dataset(
+            self, 
+            name: str, 
+            dataset_id: str, 
+            splits: list = ['train'], 
+            dataset_type: str = "paired", 
+            data_dir: str = None
+        ):
         """
         Load a Hugging Face dataset and register it under the given name for specified splits.
         
@@ -20,8 +27,9 @@ class DatasetRegistry:
             dataset_id (str): Hugging Face dataset ID.
             splits (list): List of split names to register (e.g. ["train", "validation", "test"]).
             dataset_type (str): Either "paired" or "unpaired".
+            data_dir (str): Optional directory to store the dataset locally.
         """
-        hf_ds = load_huggingface_dataset(dataset_id)
+        hf_ds = load_huggingface_dataset(dataset_id, data_dir=data_dir)
         self.datasets[name] = {}
 
         for split in splits:
