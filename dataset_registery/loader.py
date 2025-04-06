@@ -1,6 +1,7 @@
 from datasets import load_dataset
+from torch.utils.data import DataLoader
 
-def load_huggingface_dataset(dataset_id: str, data_dir: str = None):
+def load_huggingface_dataset(dataset_id: str, hf_cache_dir: str = None):
     """
     Load a Hugging Face dataset and return it in a dictionary format.
     
@@ -9,9 +10,9 @@ def load_huggingface_dataset(dataset_id: str, data_dir: str = None):
     
     Parameters:
         dataset_id (str): Hugging Face dataset ID.
-        data_dir (str): Optional directory to store the dataset locally.
+        hf_cache_dir (str): Optional directory to store the dataset locally.
     """
-    ds = load_dataset(dataset_id, cache_dir=data_dir)
+    ds = load_dataset(dataset_id, cache_dir=hf_cache_dir)
     
     # If ds is a dict (with splits) then return it; otherwise, assume a single split.
     if hasattr(ds, "keys"):
@@ -19,7 +20,25 @@ def load_huggingface_dataset(dataset_id: str, data_dir: str = None):
     else:
         return {"default": ds}
 
-# Optionally, you can include a helper to convert to a DataLoader if needed.
-def to_pytorch_dataloader(torch_dataset, batch_size: int = 32, shuffle: bool = True):
-    from torch.utils.data import DataLoader
-    return DataLoader(torch_dataset, batch_size=batch_size, shuffle=shuffle)
+def to_pytorch_dataloader(
+        torch_dataset, 
+        batch_size: int = 32, 
+        shuffle: bool = True,
+        collate_fn: callable = None
+        ) -> DataLoader:
+    """
+    Convert a PyTorch Dataset to a DataLoader.
+
+    Parameters:
+        torch_dataset (torch.utils.data.Dataset): The PyTorch dataset to convert.
+        batch_size (int): Number of samples per batch.
+        shuffle (bool): Whether to shuffle the data at every epoch.
+        collate_fn (callable): Function to merge a list of samples into a batch.
+    """
+    
+    return DataLoader(
+        torch_dataset, 
+        batch_size=batch_size, 
+        shuffle=shuffle,
+        collate_fn=collate_fn
+    )
