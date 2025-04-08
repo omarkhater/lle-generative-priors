@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import frameworks.LightenDiffusion.utils as utils
 
 from frameworks.LightenDiffusion.models.unet import DiffusionUNet
-from frameworks.LightenDiffusion.models.decom import CTDN
+from frameworks.LightenDiffusion.models.decom import RetinexDecomposition
 
 
 class EMAHelper(object):
@@ -138,9 +138,9 @@ class Net(nn.Module):
         )
         
         if self.mode == 'training':
-            self.decom = self.load_stage1(CTDN(), stage1_path)
+            self.decom = self.load_stage1(RetinexDecomposition(), stage1_path)
         else:
-            self.decom = CTDN()
+            self.decom = RetinexDecomposition()
 
         betas = get_beta_schedule(
             beta_schedule=beta_schedule,

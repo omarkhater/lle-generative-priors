@@ -17,14 +17,11 @@
 
 import torch
 import torch.nn as nn
-import warnings
 from typing import Tuple
 from .attention_mechanisms import Cross_Attention, Self_Attention
-from .backbones import Res_block, feature_pyramid, channel_down, channel_up, upsampling
+from .backbones import Res_block, feature_pyramid
 from .operators import channel_down, channel_up, upsampling
-
-warnings.filterwarnings("ignore", category=UserWarning)
-warnings.filterwarnings("ignore", category=FutureWarning)
+import numpy as np
 
 
 class ReconNet(nn.Module):
@@ -33,7 +30,7 @@ class ReconNet(nn.Module):
     Combines a feature pyramid with upsampling modules.
     """
     def __init__(self, channels: int) -> None:
-        super(ReconNet, self).__init__()
+        super().__init__()
         self.pyramid = feature_pyramid(channels)
         self.channel_down = channel_down(channels)
         self.channel_up = channel_up(channels)
@@ -163,8 +160,13 @@ class RetinexDecomposition(nn.Module):
     """
     Retinex-based decomposition module using cross- and self-attention to estimate reflectance and illumination.
     """
-    def __init__(self, channels: int) -> None:
-        super(RetinexDecomposition, self).__init__()
+    def __init__(
+            self, 
+            channels: int = 64, 
+            num_cross_attention_heads: int = 8,
+            num_self_attention_heads: int = 8
+            ) -> None:
+        super().__init__()
         self.conv0 = nn.Conv2d(3, channels, kernel_size=3, stride=1, padding=1)
         self.blocks0 = nn.Sequential(
             Res_block(channels, channels),
@@ -175,8 +177,8 @@ class RetinexDecomposition(nn.Module):
             Res_block(channels, channels),
             Res_block(channels, channels)
         )
-        self.cross_attention = Cross_Attention(dim=channels, num_heads=8)
-        self.self_attention = Self_Attention(dim=channels, num_heads=8, bias=True)
+        self.cross_attention = Cross_Attention(dim=channels, num_heads=num_cross_attention_heads)
+        self.self_attention = Self_Attention(dim=channels, num_heads=num_self_attention_heads, bias=True)
         self.conv0_1 = nn.Sequential(
             Res_block(channels, channels),
             nn.Conv2d(channels, 3, kernel_size=3, stride=1, padding=1)
@@ -220,10 +222,18 @@ class DecompositionNet(nn.Module):
     """
         Decomposition Network for low-light image enhancement.
         This network decomposes an input image into two components: reflectance and illumination.
-                image → reflectance + illumination
+
+        This decomposision is based on the Retinex model, which assumes that the observed image is a product of
+        the reflectance and illumination components. The model can be represented as:
+        observed_image = reflectance * illumination where * is the Hadamard product.
     """
 
-    def __init__(self, channels: int = 64):
+    def __init__(
+            self, 
+            channels: int = 64,
+            num_cross_attention_heads: int = 8,
+            num_self_attention_heads: int = 8
+            ) -> None:
         """
         Initialize the DecompositionNet. 
 
@@ -236,7 +246,12 @@ class DecompositionNet(nn.Module):
         """
         super().__init__()
         self.encoder = ImageEncoder(channels)
-        self.retinex = RetinexDecomposition(channels)
+        self.retinex = RetinexDecomposition(
+            channels,
+            num_cross_attention_heads=num_cross_attention_heads,
+            num_self_attention_heads=num_self_attention_heads
+            )
+        return
 
     def forward(self, image: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -246,6 +261,49 @@ class DecompositionNet(nn.Module):
         """
         _, _, _, encoded = self.encoder(image)
         return self.retinex(encoded)
+    
+
+    def get_decomposed_images(
+            self, 
+            data_loader: torch.utils.data.DataLoader, 
+            device: str ="cuda"
+            ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Get the estimated reflectance and illumination images from the model.
+
+        Args:
+            data_loader (torch.utils.data.DataLoader): DataLoader containing the input images. 
+                Expected to be 5D (N, 2, C, H, W). where N is the data size,
+            device (str): Device to run the model on. Default is "cuda".
+        
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: Estimated reflectance and illumination images.
+                Each is a numpy array of shape (N, C, H, W).
+        
+        """
+        self.to(device)
+        self.eval()
+        estimated_reflectance_list = []
+        estimated_illumination_list = []
+
+        with torch.no_grad():
+            for low_imgs, _ in data_loader:
+                low_imgs = low_imgs.to(device)
+                if low_imgs.dim() == 5:
+                    input_imgs = low_imgs[:, 0, ...]
+                else:
+                    raise ValueError(f"Unsupported input shape: {low_imgs.shape}")
+                
+                _, _, _, encoded = self.encoder(input_imgs)
+                estimated_reflectance, estimated_illumination = self.retinex(encoded)
+                estimated_reflectance_list.append(estimated_reflectance.cpu())
+                estimated_illumination_list.append(estimated_illumination.cpu())
+        
+        estimated_reflectance = torch.cat(estimated_reflectance_list, dim=0)
+        estimated_illumination = torch.cat(estimated_illumination_list, dim=0)
+        estimated_reflectance = estimated_reflectance.numpy()
+        estimated_illumination = estimated_illumination.numpy()
+        return estimated_reflectance, estimated_illumination
 
 class ReconstructionNet(nn.Module):
 
@@ -267,3 +325,36 @@ class ReconstructionNet(nn.Module):
         """
         level2, level4, level8, _ = self.encoder(image)
         return self.decoder(features, level2, level4, level8)
+
+    def get_reconstructed_images(
+        self,
+        data_loader: torch.utils.data.DataLoader,
+        device: str = "cuda"
+    ) -> np.ndarray:
+        """
+        Get the reconstructed images from the model.
+        Args:
+            data_loader (torch.utils.data.DataLoader): DataLoader containing the input images.
+                Expected to be 5D (N, 2, C, H, W). where N is the data size,
+            device (str): Device to run the model on. Default is "cuda".
+        Returns:
+            np.ndarray: Reconstructed images.
+                Each is a numpy array of shape (N, C, H, W).
+
+        """
+        self.to(device)
+        self.eval()
+
+        reconstructed_images = []
+        with torch.no_grad():
+            for low_imgs, _ in data_loader:
+                low_imgs = low_imgs.to(device)
+                if low_imgs.dim() == 5:
+                    input_imgs = low_imgs[:, 0, ...]
+                    features = low_imgs[:, 1, ...]
+                else:
+                    raise ValueError(f"Expected shape (B, 2, C, H, W), got {low_imgs.shape}")
+                output = self(input_imgs, features)
+                reconstructed_images.append(output.cpu())
+
+        return torch.cat(reconstructed_images, dim=0).numpy()
