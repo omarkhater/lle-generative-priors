@@ -153,3 +153,42 @@ def ctdn_loss_wrapper(
         )
     
     return ctdn_loss(estimated_reflectance, estimated_illumination, target_raw)
+
+
+def stage2_loss_wrapper(
+    stage2_out: dict,
+    noise_target: torch.Tensor,
+    f_low: torch.Tensor,
+    f_low_hat: torch.Tensor,
+    lambda_scc: float = .01
+) -> torch.Tensor:
+    """
+    Compute the Stage 2 diffusion loss with self-constrained consistency:
+    
+        L = L_diff + lambda_scc * L_scc
+    
+    Args:
+        stage2_out (dict): Output from Stage2 forward pass. Must contain:
+                           - "noise_est": The model's predicted noise tensor (B, C, H, W)
+                           - "x_condition": (optionally) R * L or other conditioning input
+        noise_target (torch.Tensor): The "ground-truth" or target noise (B, C, H, W).
+        f_low (torch.Tensor): The original feature/representation from the low-light image (B, F, ...).
+        f_low_hat (torch.Tensor): The model's enhanced/updated representation to be consistent (B, F, ...).
+        lambda_scc (float): Weight for the self-constrained consistency loss.
+    
+    Returns:
+        torch.Tensor: A single scalar representing the total Stage 2 loss.
+    """
+    # 1) Diffusion loss (L_diff), e.g. MSE with the "ground-truth" noise
+    predicted_noise = stage2_out["noise_est"]  # shape: (B, C, H, W)
+    l_diff = F.mse_loss(predicted_noise, noise_target)
+
+    # 2) Self-constrained consistency loss (L_scc), e.g. L1 loss between two features
+    #    that you want to remain similar.
+    #    f_low and f_low_hat might be shape (B, some_feature_dim, H?, W?),
+    #    or any shape that is consistent for an L1 comparison.
+    l_scc = F.l1_loss(f_low_hat, f_low)
+
+    # Combined
+    total_loss = l_diff + lambda_scc * l_scc
+    return total_loss
