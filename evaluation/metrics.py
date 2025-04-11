@@ -84,7 +84,10 @@ def compute_lpips(gt: torch.Tensor, pred: torch.Tensor, net_type: str = 'alex') 
         LPIPS distance as a float
     """
     try:
-        lpips_model = lpips.LPIPS(net=net_type)
+        lpips_model = lpips.LPIPS(
+            net=net_type,
+            verbose=False
+            )
         if gt.dim() == 3:
             gt = gt.unsqueeze(0)
         if pred.dim() == 3:
