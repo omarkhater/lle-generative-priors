@@ -95,6 +95,9 @@ class ImageEncoder(nn.Module):
                 - level2, level4, level8: intermediate features for skip connections
                 - encoded_features: channel-reduced version of level 3
         """
+        if x.min() < 0 or x.max() > 1:
+            print("Warning: Input images are not normalized to [0, 1]. Applying min–max normalization.")
+            x = (x - x.min()) / (x.max() - x.min())
         level2, level4, level8 = self.feature_pyramid(x)
         encoded = self.channel_down(level8)
         return level2, level4, level8, encoded
@@ -128,7 +131,8 @@ class ImageDecoder(nn.Module):
         self.final_conv = nn.Sequential(
             nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1),
             nn.LeakyReLU(),
-            nn.Conv2d(channels, 3, kernel_size=1, stride=1, padding=0)
+            nn.Conv2d(channels, 3, kernel_size=1, stride=1, padding=0),
+            nn.Sigmoid()
         )
 
     def forward(
