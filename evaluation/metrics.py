@@ -29,7 +29,19 @@ def compute_psnr(gt: np.ndarray, pred: np.ndarray) -> float:
     Returns:
         PSNR value as a float
     """
-    return peak_signal_noise_ratio(gt, pred, data_range=255)
+    if gt.shape != pred.shape:
+        raise ValueError("Input images must have the same dimensions.")
+    if gt.min() < 0 or gt.max() > 255:
+        raise ValueError("Input images must be in the range [0, 255].")
+    if pred.min() < 0 or pred.max() > 255:
+        raise ValueError("Input images must be in the range [0, 255].")
+    if gt.dtype != np.uint8 or pred.dtype != np.uint8:
+        raise ValueError("Input images must be of type uint8.")
+    try:
+        return peak_signal_noise_ratio(gt, pred, data_range=255)
+    except Exception as e:
+        print(f"Error computing PSNR: {e}")
+        return float('inf')
 
 def compute_ssim(gt: np.ndarray, pred: np.ndarray) -> float:
     """
@@ -42,7 +54,22 @@ def compute_ssim(gt: np.ndarray, pred: np.ndarray) -> float:
     Returns:
         SSIM value as a float
     """
-    return structural_similarity(gt, pred, data_range=255, channel_axis=-1, win_size=7)
+    if gt.shape != pred.shape:
+        raise ValueError("Input images must have the same dimensions.")
+    
+    if gt.min() < 0 or gt.max() > 255:
+        raise ValueError("Input images must be in the range [0, 255].")
+    if pred.min() < 0 or pred.max() > 255:
+        raise ValueError("Input images must be in the range [0, 255].")
+    if gt.dtype != np.uint8 or pred.dtype != np.uint8:
+        raise ValueError("Input images must be of type uint8.")
+    if gt.ndim != 3 or pred.ndim != 3:
+        raise ValueError("Input images must be 3-dimensional.")
+    try:
+        return structural_similarity(gt, pred, data_range=255, channel_axis=-1, win_size=7)
+    except Exception as e:
+        print(f"Error computing SSIM: {e}")
+        return float('inf')
 
 def compute_lpips(gt: torch.Tensor, pred: torch.Tensor, net_type: str = 'alex') -> float:
     """
@@ -56,22 +83,26 @@ def compute_lpips(gt: torch.Tensor, pred: torch.Tensor, net_type: str = 'alex') 
     Returns:
         LPIPS distance as a float
     """
-    lpips_model = lpips.LPIPS(net=net_type)
-    if gt.dim() == 3:
-        gt = gt.unsqueeze(0)
-    if pred.dim() == 3:
-        pred = pred.unsqueeze(0)
-    
-    gt_norm = gt * 2 - 1
-    pred_norm = pred * 2 - 1
-    
-    device = next(lpips_model.parameters()).device
-    gt_norm = gt_norm.to(device)
-    pred_norm = pred_norm.to(device)
-    
-    with torch.no_grad():
-        dist = lpips_model(gt_norm, pred_norm)
-    return dist.item()
+    try:
+        lpips_model = lpips.LPIPS(net=net_type)
+        if gt.dim() == 3:
+            gt = gt.unsqueeze(0)
+        if pred.dim() == 3:
+            pred = pred.unsqueeze(0)
+        
+        gt_norm = gt * 2 - 1
+        pred_norm = pred * 2 - 1
+        
+        device = next(lpips_model.parameters()).device
+        gt_norm = gt_norm.to(device)
+        pred_norm = pred_norm.to(device)
+        
+        with torch.no_grad():
+            dist = lpips_model(gt_norm, pred_norm)
+        return dist.item()
+    except Exception as e:
+        print(f"Error computing LPIPS: {e}")
+        return float('inf')
 
 def compute_niqe(image_tensor: torch.Tensor) -> float:
     """
@@ -83,10 +114,14 @@ def compute_niqe(image_tensor: torch.Tensor) -> float:
     Returns:
         NIQE score as a float (lower is better)
     """
-    if image_tensor.dim() == 3:
-        image_tensor = image_tensor.unsqueeze(0)
-    niqe_metric = pyiqa.create_metric('niqe_matlab')
-    return niqe_metric(image_tensor).item()
+    try:
+        if image_tensor.dim() == 3:
+            image_tensor = image_tensor.unsqueeze(0)
+        niqe_metric = pyiqa.create_metric('niqe_matlab')
+        return niqe_metric(image_tensor).item()
+    except Exception as e:
+        print(f"Error computing NIQE: {e}")
+        return float('inf')
 
 def compute_pi(lpips_val: float, niqe_val: float) -> float:
     """
@@ -99,4 +134,8 @@ def compute_pi(lpips_val: float, niqe_val: float) -> float:
     Returns:
         Perceptual Index (PI) as a float
     """
-    return 0.5 * (lpips_val + niqe_val)
+    try:
+        return 0.5 * (lpips_val + niqe_val)
+    except Exception as e:
+        print(f"Error computing PI: {e}")
+        return float('inf')
