@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
 from typing import Optional, Dict, List, Any
+from tqdm import tqdm
 from .decom import ImageEncoder, ImageDecoder, RetinexDecomposition
 from .unet import DiffusionUNet
+from ..utils.sampling import data_transform, inverse_data_transform
 
 class Stage1(nn.Module):
     """
@@ -71,6 +73,55 @@ class Stage1(nn.Module):
             })
 
         return outputs
+    
+    def get_decomposed_images(self, data_loader: torch.utils.data.DataLoader) -> Dict[str, torch.Tensor]:
+        """
+        Decompose images and return aggregated reflectance and illumination components.
+        
+        Args:
+            data_loader (torch.utils.data.DataLoader): A DataLoader yielding images with shape [B, m, 3, H, W].
+        
+        Returns:
+            Dict[str, torch.Tensor]:
+                - "R": Tensor of shape [Total_N, m, 3, H, W] containing reflectance for each sample.
+                - "L": Tensor of shape [Total_N, m, 3, H, W] containing illumination for each sample.
+        """
+        R_list = []
+        L_list = []
+        self.eval()
+        device = next(self.parameters()).device
+        with torch.no_grad():
+            for batch, _ in tqdm(data_loader, desc="Decomposing images"):
+                batch = batch.to(device)
+                outputs = self.forward(batch)
+                R_batch = torch.stack([out["R"] for out in outputs], dim=1)
+                L_batch = torch.stack([out["L"] for out in outputs], dim=1)
+                R_list.append(R_batch)
+                L_list.append(L_batch)
+        R_all = torch.cat(R_list, dim=0)
+        L_all = torch.cat(L_list, dim=0)
+        return {"R": R_all, "L": L_all}
+    
+    def get_reconstructed_images(self, data_loader: torch.utils.data.DataLoader) -> torch.Tensor:
+        """
+        Reconstruct images from the latent representations.
+        
+        Args:
+            data_loader (torch.utils.data.DataLoader): A DataLoader yielding images with shape [B, m, 3, H, W].
+        
+        Returns:
+            torch.Tensor: A tensor of reconstructed images with shape [Total_N, m, 3, H, W].
+        """
+        recon_list = []
+        self.eval()
+        device = next(self.parameters()).device
+        with torch.no_grad():
+            for batch,_ in tqdm(data_loader, "Reconstructing images"):
+                batch = batch.to(device)
+                outputs = self.forward(batch)
+                recon_batch = torch.stack([out["recon"] for out in outputs], dim=1)
+                recon_list.append(recon_batch)
+        return torch.cat(recon_list, dim=0)
     
 
 class Stage2(nn.Module):
@@ -298,3 +349,29 @@ class LightenDiffusionPipeline(nn.Module):
             conditioning, 
             eta
         )
+    
+    def predict(self, input_low: torch.Tensor) -> torch.Tensor:
+        """
+        Enhance a set of low-light images and return the final enhanced output.
+        Instead of selecting only the first sub-image, this method aggregates across all
+        sub-images (dimension 1) by averaging their latent representations and skip connection features.
+        
+        Args:
+            input_low (torch.Tensor): Low-light images, shape [B, m, 3, H, W].
+            
+        Returns:
+            torch.Tensor: Final enhanced image, shape [B, 3, H, W].
+        """
+        self.eval()
+        with torch.no_grad():
+            stage1_outputs = self.stage1(input_low)
+            f_agg    = torch.stack([out["f"]    for out in stage1_outputs], dim=0).mean(dim=0)
+            lv2_agg  = torch.stack([out["lv2"]  for out in stage1_outputs], dim=0).mean(dim=0)
+            lv4_agg  = torch.stack([out["lv4"]  for out in stage1_outputs], dim=0).mean(dim=0)
+            lv8_agg  = torch.stack([out["lv8"]  for out in stage1_outputs], dim=0).mean(dim=0)
+            f_trans = data_transform(f_agg)
+            restored_latent = self.stage2.sample_reverse(f_trans)
+            restored_latent = inverse_data_transform(restored_latent)
+            enhanced_image = self.stage1.decoder(restored_latent, lv2_agg, lv4_agg, lv8_agg)
+            return enhanced_image
+
