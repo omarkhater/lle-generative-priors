@@ -5,6 +5,7 @@ from tqdm import tqdm
 from .decom import ImageEncoder, ImageDecoder, RetinexDecomposition
 from .unet import DiffusionUNet
 from ..utils.sampling import data_transform, inverse_data_transform
+import torch.nn.functional as F
 
 class Stage1(nn.Module):
     """
@@ -55,13 +56,16 @@ class Stage1(nn.Module):
         """
         if imgs.ndim != 5:
             raise ValueError(f"Expected input shape [B, m, 3, H, W], but got {imgs.shape}")
-        _ , num_images, _ , _ , _ = imgs.shape
+        _ , num_images, _ , H , W = imgs.shape
         outputs = []
         for j in range(num_images):
             img = imgs[:, j, :, :, :]
             lv2, lv4, lv8, f = self.encoder(img)
             R, L = self.decomposer(f)
             recon = self.decoder(R, lv2, lv4, lv8)
+            if R.shape[-2:] != (H, W):
+                R = F.interpolate(R, size=(H, W), mode='bilinear', align_corners=False)
+                L = F.interpolate(L, size=(H, W), mode='bilinear', align_corners=False)
             outputs.append({
                 "f": f,
                 "R": R,

@@ -13,146 +13,144 @@ import torch.nn.functional as F
 from typing import Optional, Tuple
 
 def reconstruction_loss(
-    estimated_reflectance: torch.Tensor,
-    estimated_illumination: torch.Tensor,
-    target_raw: torch.Tensor
+    reflectances: torch.Tensor,    
+    illuminations: torch.Tensor,     
+    input_images: torch.Tensor       
 ) -> torch.Tensor:
     """
-    Compute the reconstruction loss as the L1 loss between the reconstructed image
-    (obtained by multiplying estimated reflectance and illumination) and the target raw image.
+    Implements Eq. (8) in the paper for cross reconstruction:
+       L_rec = sum_{i=1}^m sum_{j=1}^m || R^i * L^j - I^i ||_1.
+    Averages the total over (m*m) for stability.
     
     Args:
-        estimated_reflectance (torch.Tensor): Estimated reflectance tensor (B, 3, H, W).
-        estimated_illumination (torch.Tensor): Estimated illumination tensor (B, 3, H, W).
-        target_raw (torch.Tensor): Target raw/normal-light image tensor (B, 3, H, W).
+        reflectances: Stacked reflectance maps for each of the m low-light frames. Expected shape [B, m, 3, H, W].
+        illuminations: Stacked illumination maps for each of the m low-light frames. Expected shape [B, m, 3, H, W].
+        input_images: The original low-light images (the 'targets' for each frame). Expected shape [B, m, 3, H, W].
     
     Returns:
-        torch.Tensor: Reconstruction loss as a scalar tensor.
+        A scalar (mean) reconstruction loss.
     """
-    reconstructed_image: torch.Tensor = estimated_reflectance * estimated_illumination
-    return F.l1_loss(reconstructed_image, target_raw)
+    _, m, _, _, _ = reflectances.shape
+    loss_sum = 0.0
+    count = 0
+    for i in range(m):
+        R_i = reflectances[:, i]  
+        I_i = input_images[:, i]
+        for j in range(m):
+            L_j = illuminations[:, j]
+            recon_ij = R_i * L_j
+            loss_sum += F.l1_loss(recon_ij, I_i)
+            count += 1
+    return loss_sum / count
 
 
 def reflectance_consistency_loss(
-    estimated_reflectance: torch.Tensor,
-    target_reflectance: torch.Tensor
+    reflectances: torch.Tensor     
 ) -> torch.Tensor:
     """
-    Compute the reflectance consistency loss as the L1 loss between the estimated reflectance
-    and the ground-truth reflectance.
+    Implements the reflectance consistency term from Eq. (9):
+       || R^1 - R^2 ||_1  (if m=2), or pairwise for m>2.
+    We average across all unique pairs (i<j).
     
     Args:
-        estimated_reflectance (torch.Tensor): Estimated reflectance tensor (B, 3, H, W).
-        target_reflectance (torch.Tensor): Ground-truth reflectance tensor (B, 3, H, W).
-        
+        reflectances: Stacked reflectance maps for each of the m frames. Expected shape [B, m, 3, H, W].
+    
     Returns:
-        torch.Tensor: Reflectance consistency loss as a scalar tensor.
+        A scalar L1 loss penalizing differences between each pair of reflectances.
     """
-    return F.l1_loss(estimated_reflectance, target_reflectance)
+    B, m, C, H, W = reflectances.shape
+    if m < 2:
+        return torch.tensor(0.0, device=reflectances.device, dtype=reflectances.dtype)
+    
+    loss_sum = 0.0
+    pair_count = 0
+    for i in range(m):
+        for j in range(i+1, m):
+            R_i = reflectances[:, i]
+            R_j = reflectances[:, j]
+            loss_sum += F.l1_loss(R_i, R_j)
+            pair_count += 1
+    return loss_sum / max(pair_count, 1)
+
 
 
 def illumination_smoothness_loss(
-    estimated_illumination: torch.Tensor
+    illuminations: torch.Tensor, 
+    reflectances: torch.Tensor,     
+    lambda_g: float = 0.2
 ) -> torch.Tensor:
     """
-    Compute the illumination smoothness loss as the mean absolute differences of gradients
-    in both x and y directions.
+    Implements illumination smoothness from Eq. (9) with exponential weighting:
+        || ∇L * exp(-lambda_g * ∇R) ||_1
     
     Args:
-        estimated_illumination (torch.Tensor): Estimated illumination tensor (B, 3, H, W).
-        
+        illuminations: The stacked illumination maps for each of m frames. Expected shape [B, m, 3, H, W].
+        reflectances: The corresponding reflectance maps for each of m frames. Expected shape [B, m, 3, H, W].
+        lambda_g: The exponential weighting parameter.
+    
     Returns:
-        torch.Tensor: Illumination smoothness loss as a scalar tensor.
+        A scalar (mean) loss over all m frames in the batch.
     """
-    def compute_gradient(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        grad_x: torch.Tensor = tensor[:, :, 1:, :] - tensor[:, :, :-1, :]
-        grad_y: torch.Tensor = tensor[:, :, :, 1:] - tensor[:, :, :, :-1]
-        return grad_x, grad_y
-    grad_x, grad_y = compute_gradient(estimated_illumination)
-    return grad_x.abs().mean() + grad_y.abs().mean()
+    B, m, C, H, W = illuminations.shape
+    loss_sum = 0.0
+    for i in range(m):
+        L_i = illuminations[:, i]  # [B,3,H,W]
+        R_i = reflectances[:, i]   # [B,3,H,W]
+        grad_x_L = L_i[:, :, 1:, :] - L_i[:, :, :-1, :]
+        grad_y_L = L_i[:, :, :, 1:] - L_i[:, :, :, :-1]
+        grad_x_R = R_i[:, :, 1:, :] - R_i[:, :, :-1, :]
+        grad_y_R = R_i[:, :, :, 1:] - R_i[:, :, :, :-1]
+        
+        # Weight = exp( -lambda_g * |∇R| ) or sometimes directly with ∇R (paper’s eq. has ∇R).
+        # We'll interpret eq. (9) as requiring the magnitude of ∇R in the exponent:
+        weight_x = torch.exp(-lambda_g * grad_x_R.abs())
+        weight_y = torch.exp(-lambda_g * grad_y_R.abs())
+        weighted_grad_x = grad_x_L * weight_x
+        weighted_grad_y = grad_y_L * weight_y
+        smoothness_i = weighted_grad_x.abs().mean() + weighted_grad_y.abs().mean()
+        loss_sum += smoothness_i
+    
+    return loss_sum / m
+
 
 
 def ctdn_loss(
-    estimated_reflectance: torch.Tensor,
-    estimated_illumination: torch.Tensor,
-    target_raw: torch.Tensor,
-    target_reflectance: Optional[torch.Tensor] = None,
+    reflectances: torch.Tensor,   
+    illuminations: torch.Tensor,    
+    low_images: torch.Tensor,       
     weight_rec: float = 1.0,
     weight_ref: float = 0.1,
-    weight_lit: float = 0.1
+    weight_ill: float = 0.1,
+    lambda_g: float = 0.2
 ) -> torch.Tensor:
     """
-    Compute the total CTDN loss as a weighted sum of reconstruction loss, reflectance consistency loss,
-    and illumination smoothness loss.
-    
+    Stage-1 CTDN loss combining Eqs. (7)–(9) in an unsupervised manner:
+      L = L_rec + L_ref + L_ill,
+    where:
+      L_rec = sum_{i,j} || R^i * L^j - I^i ||,
+      L_ref = sum_{i<j} || R^i - R^j ||,
+      L_ill = sum_i || ∇L^i * exp(-lambda_g * ∇R^i) ||.
+
     Args:
-        estimated_reflectance (torch.Tensor): Estimated reflectance tensor (B, 3, H, W).
-        estimated_illumination (torch.Tensor): Estimated illumination tensor (B, 3, H, W).
-        target_raw (torch.Tensor): Target raw/normal-light image tensor (B, 3, H, W).
-        target_reflectance (Optional[torch.Tensor]): Ground-truth reflectance tensor (B, 3, H, W), if available.
-        weight_rec (float): Weight for the reconstruction loss.
-        weight_ref (float): Weight for the reflectance consistency loss.
-        weight_lit (float): Weight for the illumination smoothness loss.
-    
+        reflectances: Stacked reflectances for each of m frames. [B,m,3,H,W]
+        illuminations: Stacked illuminations for each of m frames. [B,m,3,H,W]
+        low_images: The original input frames. [B,m,3,H,W]
+        weight_rec: Weight for cross-reconstruction term.
+        weight_ref: Weight for reflectance consistency term.
+        weight_ill: Weight for illumination smoothness term.
+        lambda_g: Exponential weighting factor for the smoothness.
+
     Returns:
-        torch.Tensor: Total CTDN loss as a scalar tensor.
-    
-    Raises:
-        ValueError: If the spatial dimensions of the tensors do not match.
+        A scalar, the total Stage-1 CTDN loss.
     """
-    if target_raw.shape[2:] != estimated_reflectance.shape[2:]:
-        raise ValueError(
-            f"Target raw image shape {target_raw.shape[2:]} does not match estimated reflectance shape {estimated_reflectance.shape[2:]}."
-        )
+    loss_rec = reconstruction_loss(reflectances, illuminations, low_images)
+    loss_ref = reflectance_consistency_loss(reflectances)
+    loss_ill = illumination_smoothness_loss(illuminations, reflectances, lambda_g)
     
-    if target_reflectance is not None and target_reflectance.shape[2:] != estimated_reflectance.shape[2:]:
-        raise ValueError(
-            f"Target reflectance shape {target_reflectance.shape[2:]} does not match estimated reflectance shape {estimated_reflectance.shape[2:]}."
-        )
-    
-    loss_reconstruction: torch.Tensor = reconstruction_loss(estimated_reflectance, estimated_illumination, target_raw)
-    
-    if target_reflectance is not None:
-        loss_reflectance: torch.Tensor = reflectance_consistency_loss(estimated_reflectance, target_reflectance)
-    else:
-        loss_reflectance: torch.Tensor = torch.tensor(0.0, device=target_raw.device, dtype=target_raw.dtype)
-    
-    loss_illumination: torch.Tensor = illumination_smoothness_loss(estimated_illumination)
-    
-    total_loss: torch.Tensor = (
-        weight_rec * loss_reconstruction +
-        weight_ref * loss_reflectance +
-        weight_lit * loss_illumination
-    )
+    total_loss = (weight_rec * loss_rec
+                  + weight_ref * loss_ref
+                  + weight_ill * loss_ill)
     return total_loss
-
-
-def ctdn_loss_wrapper(
-    outputs: Tuple[torch.Tensor, torch.Tensor],
-    target_raw: torch.Tensor
-) -> torch.Tensor:
-    """
-    Wrapper for the CTDN loss function. Ensures that model outputs are resized to match the target,
-    then computes the total CTDN loss.
-    
-    Args:
-        outputs (Tuple[torch.Tensor, torch.Tensor]): A tuple containing (estimated_reflectance, estimated_illumination).
-        target_raw (torch.Tensor): Target raw/normal-light image tensor.
-    
-    Returns:
-        torch.Tensor: Total CTDN loss.
-    """
-    estimated_reflectance, estimated_illumination = outputs
-
-    if estimated_reflectance.shape[2:] != target_raw.shape[2:]:
-        estimated_reflectance = F.interpolate(
-            estimated_reflectance, size=target_raw.shape[2:], mode='bilinear', align_corners=False
-        )
-        estimated_illumination = F.interpolate(
-            estimated_illumination, size=target_raw.shape[2:], mode='bilinear', align_corners=False
-        )
-    
-    return ctdn_loss(estimated_reflectance, estimated_illumination, target_raw)
 
 
 def noise_loss(

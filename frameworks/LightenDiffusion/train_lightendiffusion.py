@@ -4,9 +4,10 @@ import copy
 import torch.nn as nn
 from typing import Tuple, Dict, List, Optional, Any
 from torch.utils.data import DataLoader
-from .losses import ctdn_loss_wrapper, stage2_loss_wrapper, noise_loss, self_constrained_consistency_loss
+from .losses import ctdn_loss, stage2_loss_wrapper, noise_loss, self_constrained_consistency_loss
 import traceback
 import torch.nn.functional as F
+from frameworks.LightenDiffusion.visualization.visualize_stage1 import visualize_stage1_results_individual, visualize_stage1_results_avg
 
 class BaseTrainer:
     """
@@ -65,6 +66,11 @@ class BaseTrainer:
         return running_loss / len(self.train_loader)
 
     def train(self) -> Tuple[nn.Module, Dict[str, Any]]:
+        """
+        Main training loop with optional validation, early stopping, and LR scheduling.
+        Returns:
+            (model, metrics) where metrics includes 'train_losses', 'val_losses', etc.
+        """
         try:
             num_bad = 0
             for epoch in range(self.num_epochs):
@@ -114,44 +120,158 @@ class Stage1Trainer(BaseTrainer):
     """
     Trainer for Stage1 (Encoder + Retinex Decomposition + Decoder).
     
-    For Stage1 training, each training sample must contain paired low images with shape [B, 2, 3, H, W]:
-      - low_imgs[:,0] is used as input.
-      - low_imgs[:,1] is the target (raw/normal-light) image.
+    For Stage1 training, each training sample must contain paired low images with shape [B, m, 3, H, W]:
     Stage1 returns a list of dictionaries; we extract the first dictionary and use its (R, L)
     outputs with ctdn_loss_wrapper to compute the loss.
     """
+    def __init__(
+        self,
+        model: nn.Module,
+        train_loader: DataLoader,
+        val_loader: DataLoader,
+        optimizer: torch.optim.Optimizer,
+        device: torch.device,
+        scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
+        num_epochs: int = 100,
+        val_frequency: int = 5,
+        patience: int = 5,
+        log_interval: int = 100,
+        weight_rec: float = 1.0,
+        weight_ref: float = 0.1,
+        weight_ill: float = 0.1,
+        lambda_g: float = 0.2
+    ):
+        """
+        Args:
+            model (nn.Module): The Stage1 model (Encoder + Retinex + Decoder).
+            train_loader (DataLoader): Training DataLoader yielding (low_imgs, _).
+            val_loader (DataLoader): Validation DataLoader yielding (low_imgs, _).
+            optimizer (torch.optim.Optimizer): Optimizer for Stage1 parameters.
+            device (torch.device): 'cpu' or 'cuda' device.
+            scheduler (Optional): Learning rate scheduler.
+            num_epochs (int): Max number of epochs to train.
+            val_frequency (int): Run validation every N epochs.
+            patience (int): Early-stopping patience.
+            log_interval (int): Print batch loss every N iterations.
+            weight_rec (float): Weight for reconstruction term in ctdn_loss.
+            weight_ref (float): Weight for reflectance-consistency term in ctdn_loss.
+            weight_ill (float): Weight for illumination-smoothness term in ctdn_loss.
+            lambda_g (float): Exponential weighting factor for gradient in ctdn_loss.
+        """
+        self.model = model.to(device)
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        self.optimizer = optimizer
+        self.device = device
+        self.scheduler = scheduler
+        self.num_epochs = num_epochs
+        self.val_frequency = val_frequency
+        self.patience = patience
+        self.log_interval = log_interval
+
+        # Stage1 loss hyperparams
+        self.weight_rec = weight_rec
+        self.weight_ref = weight_ref
+        self.weight_ill = weight_ill
+        self.lambda_g = lambda_g
+
+        # Tracking best model
+        self.best_loss = float('inf')
+        self.best_epoch = 0
+        self.best_state = copy.deepcopy(self.model.state_dict())
+
+        # Logs
+        self.train_losses: List[float] = []
+        self.val_losses: List[float] = []
+
     def train_epoch(self) -> float:
+        """
+        Train for one epoch in unsupervised Stage1:
+          1) Forward pass: model(low_imgs) => list of dictionaries [ {R, L}, {R, L}, ... ]
+          2) Stack reflectances/illuminations => [B, m, 3, H, W]
+          3) ctdn_loss(...) => cross reconstruction + reflectance consistency + illumination smoothness
+        """
         self.model.train()
         running_loss = 0.0
-        for i, (low_imgs, _) in enumerate(tqdm(self.train_loader, desc="Training Stage1", leave=False)):
-            low_imgs = low_imgs.to(self.device)
-            outputs_list = self.model(low_imgs)
-            outputs = outputs_list[0]
-            loss = ctdn_loss_wrapper((outputs["R"], outputs["L"]), low_imgs[:, 1, ...])
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
-            running_loss += loss.item()
-            if (i + 1) % self.log_interval == 0:
-                avg = running_loss / (i + 1)
-                tqdm.write(f"  Batch {i+1}/{len(self.train_loader)}, loss={avg:.4f}")
         
-        loss = running_loss / len(self.train_loader)
-        return loss
-    
+        for i, (low_imgs, _) in enumerate(tqdm(self.train_loader, desc="Training Stage1", leave=False)):
+            low_imgs = low_imgs.to(self.device)  # shape [B, m, 3, H, W]
+            
+            # 1) Forward pass => list of length m
+            outputs_list = self.model(low_imgs)
+            # Each element is a dict: {"R": R_ij, "L": L_ij, ...}
 
+            # 2) Gather R and L into a single tensor
+            reflectances = []
+            illuminations = []
+            for j in range(low_imgs.shape[1]):
+                reflectances.append(outputs_list[j]["R"])  # shape [B,3,H,W]
+                illuminations.append(outputs_list[j]["L"])
+            # Stack along dim=1 => shape [B,m,3,H,W]
+            reflectances = torch.stack(reflectances, dim=1)
+            illuminations = torch.stack(illuminations, dim=1)
+
+            # 3) Compute Stage1 CTDN loss
+            loss_total = ctdn_loss(
+                reflectances, 
+                illuminations,
+                low_imgs,  # same low imgs for reconstruction
+                weight_rec=self.weight_rec,
+                weight_ref=self.weight_ref,
+                weight_ill=self.weight_ill,
+                lambda_g=self.lambda_g
+            )
+
+            self.optimizer.zero_grad()
+            loss_total.backward()
+            self.optimizer.step()
+
+            running_loss += loss_total.item()
+            if (i + 1) % self.log_interval == 0:
+                avg_loss = running_loss / (i + 1)
+                tqdm.write(f"  Batch {i+1}/{len(self.train_loader)}: loss={avg_loss:.4f}")
+
+        return running_loss / len(self.train_loader)
 
     def validate(self) -> float:
+        """
+        Validation for Stage1: do the same procedure with no grad,
+        compute the average ctdn_loss over the val_loader.
+        """
         self.model.eval()
         running_loss = 0.0
+
         with torch.no_grad():
             for low_imgs, _ in self.val_loader:
                 low_imgs = low_imgs.to(self.device)
+
                 outputs_list = self.model(low_imgs)
-                outputs = outputs_list[0]
-                loss = ctdn_loss_wrapper((outputs["R"], outputs["L"]), low_imgs[:, 1, ...])
-                running_loss += loss.item()
-        return running_loss / len(self.val_loader)
+                reflectances = []
+                illuminations = []
+                for j in range(low_imgs.shape[1]):
+                    reflectances.append(outputs_list[j]["R"])
+                    illuminations.append(outputs_list[j]["L"])
+                reflectances = torch.stack(reflectances, dim=1)
+                illuminations = torch.stack(illuminations, dim=1)
+
+                loss_total = ctdn_loss(
+                    reflectances, 
+                    illuminations,
+                    low_imgs,
+                    weight_rec=self.weight_rec,
+                    weight_ref=self.weight_ref,
+                    weight_ill=self.weight_ill,
+                    lambda_g=self.lambda_g
+                )
+                running_loss += loss_total.item()
+
+        avg_loss = running_loss / len(self.val_loader)
+
+        print("Visualizing Stage1 results using individual reconstructions...")
+        visualize_stage1_results_individual(self.model, self.val_loader, num_samples=2)
+        print("Visualizing Stage1 results using average reconstruction...")
+        visualize_stage1_results_avg(self.model, self.val_loader, num_samples=2)
+        return avg_loss
 
 class Stage2Trainer(BaseTrainer):
     """
