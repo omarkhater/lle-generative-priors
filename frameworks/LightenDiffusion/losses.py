@@ -10,67 +10,63 @@
 
 import torch
 import torch.nn.functional as F
-from typing import Optional, Tuple
 
 def reconstruction_loss(
     reflectances: torch.Tensor,    
     illuminations: torch.Tensor,     
-    input_images: torch.Tensor       
+    features: torch.Tensor       
 ) -> torch.Tensor:
     """
-    Implements Eq. (8) in the paper for cross reconstruction:
-       L_rec = sum_{i=1}^m sum_{j=1}^m || R^i * L^j - I^i ||_1.
-    Averages the total over (m*m) for stability.
+    Implements Eq. (8) in the paper for reconstruction loss:
+       L_rec = sum_{i=1}^m sum_{j=1}^m || F^j - R^i * L^j ||_1.
+    
+    It aims to guarantee the decomposed components can reconstruct the encoded features.
     
     Args:
         reflectances: Stacked reflectance maps for each of the m low-light frames. Expected shape [B, m, 3, H, W].
         illuminations: Stacked illumination maps for each of the m low-light frames. Expected shape [B, m, 3, H, W].
-        input_images: The original low-light images (the 'targets' for each frame). Expected shape [B, m, 3, H, W].
+        features: Encoded features for each of the m frames. Expected shape [B, m, C, H, W] or similar.
     
     Returns:
         A scalar (mean) reconstruction loss.
     """
-    _, m, _, _, _ = reflectances.shape
+    _, m, _, H, W = reflectances.shape
     loss_sum = 0.0
-    count = 0
     for i in range(m):
         R_i = reflectances[:, i]  
-        I_i = input_images[:, i]
         for j in range(m):
             L_j = illuminations[:, j]
+            F_i = features[:, j]
             recon_ij = R_i * L_j
-            loss_sum += F.l1_loss(recon_ij, I_i)
-            count += 1
-    return loss_sum / count
+            loss_sum += F.l1_loss(F_i, recon_ij)
+    return loss_sum
 
 
 def reflectance_consistency_loss(
     reflectances: torch.Tensor     
 ) -> torch.Tensor:
     """
-    Implements the reflectance consistency term from Eq. (9):
-       || R^1 - R^2 ||_1  (if m=2), or pairwise for m>2.
-    We average across all unique pairs (i<j).
+    Implements the reflectance consistency loss in a multi–image setting by comparing each
+    reflectance to the mean reflectance:
+    
+        L_ref = 1/m * sum_{i=1}^{m} || R^i - \bar{R} ||_1,
+    
+    where \(\bar{R}\) is the average reflectance over m images.
     
     Args:
         reflectances: Stacked reflectance maps for each of the m frames. Expected shape [B, m, 3, H, W].
     
     Returns:
-        A scalar L1 loss penalizing differences between each pair of reflectances.
+        A scalar L1 loss.
     """
     B, m, C, H, W = reflectances.shape
-    if m < 2:
-        return torch.tensor(0.0, device=reflectances.device, dtype=reflectances.dtype)
-    
-    loss_sum = 0.0
-    pair_count = 0
-    for i in range(m):
-        for j in range(i+1, m):
-            R_i = reflectances[:, i]
-            R_j = reflectances[:, j]
-            loss_sum += F.l1_loss(R_i, R_j)
-            pair_count += 1
-    return loss_sum / max(pair_count, 1)
+    # Compute the mean reflectance over the m frames
+    R_mean = reflectances.mean(dim=1, keepdim=True)  # shape [B, 1, 3, H, W]
+    R_mean_expanded = R_mean.expand_as(reflectances)  # shape [B, m, 3, H, W]
+    # Compute the average L1 difference from the mean for each image in the batch
+    loss = F.l1_loss(reflectances, R_mean_expanded, reduction='mean')
+    return loss
+
 
 
 def content_loss(
@@ -134,8 +130,8 @@ def illumination_smoothness_loss(
 
 def ctdn_loss(
     reflectances: torch.Tensor,   
-    illuminations: torch.Tensor,    
-    low_images: torch.Tensor,       
+    illuminations: torch.Tensor,       
+    encoded_features: torch.Tensor,    
     weight_rec: float = .1,
     weight_ref: float = 0.1,
     weight_ill: float = 0.01,
@@ -153,6 +149,7 @@ def ctdn_loss(
         reflectances: Stacked reflectances for each of m frames. [B,m,3,H,W]
         illuminations: Stacked illuminations for each of m frames. [B,m,3,H,W]
         low_images: The original input frames. [B,m,3,H,W]
+        encoded_features: The encoded features for each of m frames. [B,m,C,H,W]
         weight_rec: Weight for cross-reconstruction term.
         weight_ref: Weight for reflectance consistency term.
         weight_ill: Weight for illumination smoothness term.
@@ -161,7 +158,7 @@ def ctdn_loss(
     Returns:
         A scalar, the total Stage-1 CTDN loss.
     """
-    loss_rec = reconstruction_loss(reflectances, illuminations, low_images)
+    loss_rec = reconstruction_loss(reflectances, illuminations, encoded_features)
     loss_ref = reflectance_consistency_loss(reflectances)
     loss_ill = illumination_smoothness_loss(illuminations, reflectances, lambda_g)
     

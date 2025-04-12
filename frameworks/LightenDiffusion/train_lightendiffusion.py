@@ -214,20 +214,21 @@ class Stage1Trainer(BaseTrainer):
             reflectances = []
             illuminations = []
             decoder_recons = []
+            encoded_features = []
             for j in range(low_imgs.shape[1]):
-                reflectances.append(outputs_list[j]["R"])  # shape [B, 3, H, W]
-                illuminations.append(outputs_list[j]["L"]) # shape [B, 3, H, W]
+                reflectances.append(outputs_list[j]["R"])  # shape [B, 3, H/8, W/8]
+                illuminations.append(outputs_list[j]["L"]) # shape [B, 3, H/8, W/8]
                 decoder_recons.append(outputs_list[j]["recon"]) # shape [B, 3, H, W]
-            # Stack along dim=1 => shape [B,m,3,H,W]
-            reflectances = torch.stack(reflectances, dim=1)
-            illuminations = torch.stack(illuminations, dim=1)
-            reconstructions = torch.stack(decoder_recons, dim=1)
+                encoded_features.append(outputs_list[j]["f"]) # shape [B, C, H/8, W/8]
 
-            # 3) Compute Stage1 CTDN loss
-            loss_total = ctdn_loss(
+            reflectances = torch.stack(reflectances, dim=1) # shape [B, m, 3, H/8, W/8]
+            illuminations = torch.stack(illuminations, dim=1) # shape [B, m, 3, H/8, W/8]
+            reconstructions = torch.stack(decoder_recons, dim=1) # shape [B, m, 3, H, W]
+            encoded_features = torch.stack(encoded_features, dim=1) # shape [B, m, C, H/8, W/8]
+            loss_ctdn = ctdn_loss(
                 reflectances, 
                 illuminations,
-                low_imgs,  
+                encoded_features,  
                 weight_rec=self.weight_rec,
                 weight_ref=self.weight_ref,
                 weight_ill=self.weight_ill,
@@ -237,7 +238,7 @@ class Stage1Trainer(BaseTrainer):
                 reconstructions,
                 low_imgs
             )
-            loss_total = loss_total + self.weight_cont * loss_con
+            loss_total = loss_ctdn + self.weight_cont * loss_con
             self.optimizer.zero_grad()
             loss_total.backward()
             self.optimizer.step()
@@ -245,7 +246,10 @@ class Stage1Trainer(BaseTrainer):
             running_loss += loss_total.item()
             if (i + 1) % self.log_interval == 0:
                 avg_loss = running_loss / (i + 1)
-                tqdm.write(f"  Batch {i+1}/{len(self.train_loader)}: loss={avg_loss:.4f}")
+                avg_content_loss = loss_con.item() / (i + 1)
+                avg_ctdn_loss = loss_ctdn.item() / (i + 1)
+                tqdm.write(f"""
+Batch {i+1}/{len(self.train_loader)}: content loss = {avg_content_loss:.4f}, ctdn loss: {avg_ctdn_loss} , Total loss={avg_loss:.4f}""")
 
         return running_loss / len(self.train_loader)
 
@@ -264,16 +268,19 @@ class Stage1Trainer(BaseTrainer):
                 outputs_list = self.model(low_imgs)
                 reflectances = []
                 illuminations = []
+                encoded_features = []
                 for j in range(low_imgs.shape[1]):
                     reflectances.append(outputs_list[j]["R"])
                     illuminations.append(outputs_list[j]["L"])
+                    encoded_features.append(outputs_list[j]["f"])
                 reflectances = torch.stack(reflectances, dim=1)
                 illuminations = torch.stack(illuminations, dim=1)
+                encoded_features = torch.stack(encoded_features, dim=1)
 
                 loss_total = ctdn_loss(
                     reflectances, 
                     illuminations,
-                    low_imgs,
+                    encoded_features,
                     weight_rec=self.weight_rec,
                     weight_ref=self.weight_ref,
                     weight_ill=self.weight_ill,

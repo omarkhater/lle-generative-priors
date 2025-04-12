@@ -92,8 +92,8 @@ class ImageEncoder(nn.Module):
 
         Returns:
             Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-                - level2, level4, level8: intermediate features for skip connections
-                - encoded_features: channel-reduced version of level 3
+                - level2, level4, level8: intermediate features for skip connections ([B, C, H/2, W/2], [B, C, H/4, W/4], [B, C, H/8, W/8])
+                - encoded_features: channel-reduced version of level 3. [B, C, H/8, W/8]
         """
         if x.min() < 0 or x.max() > 1:
             print("Warning: Input images are not normalized to [0, 1]. Applying min–max normalization.")
@@ -146,10 +146,10 @@ class ImageDecoder(nn.Module):
         Reconstruct an image from encoded features and intermediate pyramid features.
 
         Args:
-            encoded (torch.Tensor): Encoded features from the encoder.
-            level2 (torch.Tensor): Intermediate feature from level 2 of the pyramid.
-            level4 (torch.Tensor): Intermediate feature from level 4 of the pyramid.
-            level8 (torch.Tensor): Intermediate feature from level 8 of the pyramid.
+            encoded (torch.Tensor): Encoded features from the encoder. [B, C, H/8, W/8]
+            level2 (torch.Tensor): Intermediate feature from level 2 of the pyramid. [B, C, H/2, W/2]
+            level4 (torch.Tensor): Intermediate feature from level 4 of the pyramid. [B, C, H/4, W/4]
+            level8 (torch.Tensor): Intermediate feature from level 8 of the pyramid. [B, C, H/8, W/8]
 
         Returns:
             torch.Tensor: Reconstructed image (B, 3, H, W)

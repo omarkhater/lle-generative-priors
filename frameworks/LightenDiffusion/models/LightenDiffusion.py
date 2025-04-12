@@ -49,23 +49,21 @@ class Stage1(nn.Module):
         
         Returns:
             List[Dict[str, torch.Tensor]]: A list where each element is a dictionary containing:
-                - "f": Encoded features (Latent Image Representation).
-                - "R": Reflectance extracted from the features.
-                - "L": Illumination extracted from the features.
-                - "recon": Reconstructed image produced by the decoder.
+                - "f": Encoded features (Latent Image Representation). [B, C, H/8, W/8]
+                - "R": Reflectance extracted from the features. [B, C, H/8, W/8]
+                - "L": Illumination extracted from the features. [B, C, H/8, W/8]
+                - "recon": Reconstructed image produced by the decoder. [B, 3, H, W]
+                - "lv2", "lv4", "lv8": Intermediate features from the encoder. [B, C, H/2, W/2], [B, C, H/4, W/4], [B, C, H/8, W/8]
         """
         if imgs.ndim != 5:
             raise ValueError(f"Expected input shape [B, m, 3, H, W], but got {imgs.shape}")
-        _ , num_images, _ , H , W = imgs.shape
+        _ , num_images, _ , _ , _ = imgs.shape
         outputs = []
         for j in range(num_images):
             img = imgs[:, j, :, :, :]
             lv2, lv4, lv8, f = self.encoder(img)
             R, L = self.decomposer(f)
             recon = self.decoder(R, lv2, lv4, lv8)
-            if R.shape[-2:] != (H, W):
-                R = F.interpolate(R, size=(H, W), mode='bilinear', align_corners=False)
-                L = F.interpolate(L, size=(H, W), mode='bilinear', align_corners=False)
             outputs.append({
                 "f": f,
                 "R": R,
