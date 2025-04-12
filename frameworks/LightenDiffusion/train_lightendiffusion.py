@@ -82,7 +82,7 @@ class BaseTrainer:
             for epoch in range(self.num_epochs):
                 train_loss = self.train_epoch()
                 self.train_losses.append(train_loss)
-                if epoch % self.val_frequency == 0:
+                if epoch > 1 and epoch % self.val_frequency == 0:
                     val_loss = self.validate()
                     self.val_losses.append(val_loss)
                     print(f"Epoch {epoch+1}/{self.num_epochs}: train={train_loss:.4f}, val={val_loss:.4f}")
