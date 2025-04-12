@@ -194,7 +194,7 @@ class RetinexDecomposition(nn.Module):
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Decompose the 3-channel input image x into reflectance (R) and illumination (L).
+        Decompose the encoded input image x into reflectance (R) and illumination (L).
         The decomposition is performed using a combination of convolutional layers, residual blocks,
         and attention mechanisms. The input image is first processed to estimate the illumination,
         and then the reflectance is computed. The final reflectance and illumination are obtained

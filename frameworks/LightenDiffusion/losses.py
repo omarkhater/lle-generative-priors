@@ -120,8 +120,8 @@ def ctdn_loss(
     low_images: torch.Tensor,       
     weight_rec: float = 1.0,
     weight_ref: float = 0.1,
-    weight_ill: float = 0.1,
-    lambda_g: float = 0.2
+    weight_ill: float = 0.01,
+    lambda_g: float = 10
 ) -> torch.Tensor:
     """
     Stage-1 CTDN loss combining Eqs. (7)–(9) in an unsupervised manner:
