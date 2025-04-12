@@ -23,8 +23,8 @@ def reconstruction_loss(
     It aims to guarantee the decomposed components can reconstruct the encoded features.
     
     Args:
-        reflectances: Stacked reflectance maps for each of the m low-light frames. Expected shape [B, m, 3, H, W].
-        illuminations: Stacked illumination maps for each of the m low-light frames. Expected shape [B, m, 3, H, W].
+        reflectances: Stacked reflectance maps for each of the m low-light frames. Expected shape [B, m, C, H, W].
+        illuminations: Stacked illumination maps for each of the m low-light frames. Expected shape [B, m, C, H, W].
         features: Encoded features for each of the m frames. Expected shape [B, m, C, H, W] or similar.
     
     Returns:
@@ -36,9 +36,9 @@ def reconstruction_loss(
         R_i = reflectances[:, i]  
         for j in range(m):
             L_j = illuminations[:, j]
-            F_i = features[:, j]
+            F_j = features[:, j]
             recon_ij = R_i * L_j
-            loss_sum += F.l1_loss(F_i, recon_ij)
+            loss_sum += F.l1_loss(F_j, recon_ij)
     return loss_sum
 
 
@@ -60,10 +60,8 @@ def reflectance_consistency_loss(
         A scalar L1 loss.
     """
     B, m, C, H, W = reflectances.shape
-    # Compute the mean reflectance over the m frames
     R_mean = reflectances.mean(dim=1, keepdim=True)  # shape [B, 1, 3, H, W]
     R_mean_expanded = R_mean.expand_as(reflectances)  # shape [B, m, 3, H, W]
-    # Compute the average L1 difference from the mean for each image in the batch
     loss = F.l1_loss(reflectances, R_mean_expanded, reduction='mean')
     return loss
 

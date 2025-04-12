@@ -197,7 +197,7 @@ class Stage1Trainer(BaseTrainer):
         """
         Train for one epoch in unsupervised Stage1:
           1) Forward pass: model(low_imgs) => list of dictionaries [ {R, L}, {R, L}, ... ]
-          2) Stack reflectances/illuminations => [B, m, 3, H, W]
+          2) Stack reflectances/illuminations => [B, m, C, H, W]
           3) ctdn_loss(...) => cross reconstruction + reflectance consistency + illumination smoothness
         """
         self.model.train()
@@ -216,15 +216,21 @@ class Stage1Trainer(BaseTrainer):
             decoder_recons = []
             encoded_features = []
             for j in range(low_imgs.shape[1]):
-                reflectances.append(outputs_list[j]["R"])  # shape [B, 3, H/8, W/8]
-                illuminations.append(outputs_list[j]["L"]) # shape [B, 3, H/8, W/8]
+                reflectances.append(outputs_list[j]["R"])  # shape [B, C, H/8, W/8]
+                illuminations.append(outputs_list[j]["L"]) # shape [B, C, H/8, W/8]
                 decoder_recons.append(outputs_list[j]["recon"]) # shape [B, 3, H, W]
                 encoded_features.append(outputs_list[j]["f"]) # shape [B, C, H/8, W/8]
 
-            reflectances = torch.stack(reflectances, dim=1) # shape [B, m, 3, H/8, W/8]
-            illuminations = torch.stack(illuminations, dim=1) # shape [B, m, 3, H/8, W/8]
+            reflectances = torch.stack(reflectances, dim=1)     # shape [B, m, C, H/8, W/8]
+            illuminations = torch.stack(illuminations, dim=1)    # shape [B, m, C, H/8, W/8]
             reconstructions = torch.stack(decoder_recons, dim=1) # shape [B, m, 3, H, W]
             encoded_features = torch.stack(encoded_features, dim=1) # shape [B, m, C, H/8, W/8]
+            
+            # For debugging
+            if i == 0:
+                print(f"reflectances: {reflectances.shape}, illuminations: {illuminations.shape}, "
+                      f"reconstructions: {reconstructions.shape}, encoded_features: {encoded_features.shape}")
+            
             loss_ctdn = ctdn_loss(
                 reflectances, 
                 illuminations,
@@ -246,8 +252,8 @@ class Stage1Trainer(BaseTrainer):
             running_loss += loss_total.item()
             if (i + 1) % self.log_interval == 0:
                 avg_loss = running_loss / (i + 1)
-                avg_content_loss = loss_con.item() / (i + 1)
-                avg_ctdn_loss = loss_ctdn.item() / (i + 1)
+                avg_content_loss = loss_con.item()
+                avg_ctdn_loss = loss_ctdn.item()
                 tqdm.write(f"""
 Batch {i+1}/{len(self.train_loader)}: content loss = {avg_content_loss:.4f}, ctdn loss: {avg_ctdn_loss} , Total loss={avg_loss:.4f}""")
 

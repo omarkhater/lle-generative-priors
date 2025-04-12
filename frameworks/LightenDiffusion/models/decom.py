@@ -163,6 +163,7 @@ class ImageDecoder(nn.Module):
 class RetinexDecomposition(nn.Module):
     """
     Retinex-based decomposition module using cross- and self-attention to estimate reflectance and illumination.
+    Operates in the latent space, maintaining the channel dimensionality throughout the process.
     """
     def __init__(
             self, 
@@ -171,12 +172,13 @@ class RetinexDecomposition(nn.Module):
             num_self_attention_heads: int = 8
             ) -> None:
         super().__init__()
-        self.conv0 = nn.Conv2d(3, channels, kernel_size=3, stride=1, padding=1)
+        self.channels = channels
+        self.conv0 = nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1)
         self.blocks0 = nn.Sequential(
             Res_block(channels, channels),
             Res_block(channels, channels)
         )
-        self.conv1 = nn.Conv2d(1, channels, kernel_size=3, stride=1, padding=1)
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1)
         self.blocks1 = nn.Sequential(
             Res_block(channels, channels),
             Res_block(channels, channels)
@@ -185,31 +187,30 @@ class RetinexDecomposition(nn.Module):
         self.self_attention = Self_Attention(dim=channels, num_heads=num_self_attention_heads, bias=True)
         self.conv0_1 = nn.Sequential(
             Res_block(channels, channels),
-            nn.Conv2d(channels, 3, kernel_size=3, stride=1, padding=1)
+            nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1)
         )
         self.conv1_1 = nn.Sequential(
             Res_block(channels, channels),
-            nn.Conv2d(channels, 1, kernel_size=3, stride=1, padding=1)
+            nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1)
         )
+        self.init_illum_transform = nn.Conv2d(1, channels, kernel_size=3, stride=1, padding=1)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Decompose the encoded input image x into reflectance (R) and illumination (L).
-        The decomposition is performed using a combination of convolutional layers, residual blocks,
-        and attention mechanisms. The input image is first processed to estimate the illumination,
-        and then the reflectance is computed. The final reflectance and illumination are obtained
-        through a series of transformations and attention mechanisms.
-
+        Decompose the encoded input feature x into reflectance (R) and illumination (L)
+        in the latent space.
+        
         Args:
-            x (torch.Tensor): Input image tensor of shape (B, 3, H, W)
+            x (torch.Tensor): Input feature tensor in latent space of shape (B, C, H, W)
         
         Returns:
             Tuple[torch.Tensor, torch.Tensor]: 
-                Reflectance (R): Tensor of shape (B, 3, H, W) 
-                Illumination (L) Tensor of shape (B, 1, H, W).
+                Reflectance (R): Tensor of shape (B, C, H, W) 
+                Illumination (L): Tensor of shape (B, C, H, W).
         """
-        init_illumination = torch.max(x, dim=1, keepdim=True)[0]
-        init_reflectance = x / (init_illumination + 1e-6)  # Avoid division by zero.
+        init_illumination = torch.max(x, dim=1, keepdim=True)[0]  # [B, 1, H, W]
+        init_illumination = self.init_illum_transform(init_illumination)  # [B, C, H, W]
+        init_reflectance = x 
         Reflectance = self.blocks0(self.conv0(init_reflectance))
         Illumination = self.blocks1(self.conv1(init_illumination))
         Reflectance_final = self.cross_attention(Illumination, Reflectance)
@@ -218,5 +219,5 @@ class RetinexDecomposition(nn.Module):
         Illumination_final = self.conv1_1(Illumination - Illumination_content)
         Reflectance = torch.sigmoid(Reflectance_final)
         Illumination = torch.sigmoid(Illumination_final)
-        Illumination = torch.cat([Illumination] * 3, dim=1)
+        
         return Reflectance, Illumination
