@@ -40,7 +40,9 @@ def get_visualization_batch(data_loader: DataLoader, is_paired: bool, device: st
 def visualize_stage1_results_avg(stage1: torch.nn.Module,
                                  data_loader: DataLoader,
                                  num_samples: int = 8,
-                                 is_paired: bool = True) -> None:
+                                 is_paired: bool = True,
+                                 seed: int = 42) -> None:
+    torch.manual_seed(seed)
     """
     Visualize Stage1 outputs using the averaged output approach.
     
@@ -145,7 +147,8 @@ def visualize_stage1_results_avg(stage1: torch.nn.Module,
 def visualize_stage1_results_individual(stage1: torch.nn.Module,
                                         data_loader: DataLoader,
                                         num_samples: int = 8,
-                                        is_paired: bool = True) -> None:
+                                        is_paired: bool = True,
+                                        seed: int = 42) -> None:
     """
     Visualize Stage1 outputs by displaying individual reconstructions.
     
@@ -161,6 +164,7 @@ def visualize_stage1_results_individual(stage1: torch.nn.Module,
         num_samples (int): Number of samples to visualize.
         is_paired (bool): Whether ground truth is available.
     """
+    torch.manual_seed(seed)
     stage1.eval()
     device = next(stage1.parameters()).device
     sample_batch, gt_batch = get_visualization_batch(data_loader, is_paired, device)
