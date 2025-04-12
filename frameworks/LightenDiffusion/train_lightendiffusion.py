@@ -4,7 +4,13 @@ import copy
 import torch.nn as nn
 from typing import Tuple, Dict, List, Optional, Any
 from torch.utils.data import DataLoader
-from .losses import ctdn_loss, stage2_loss_wrapper, noise_loss, self_constrained_consistency_loss
+from .losses import (
+    ctdn_loss, 
+    content_loss,
+    stage2_loss_wrapper, 
+    noise_loss, 
+    self_constrained_consistency_loss
+)
 import traceback
 import torch.nn.functional as F
 from frameworks.LightenDiffusion.visualization.visualize_stage1 import visualize_stage1_results_individual, visualize_stage1_results_avg
@@ -136,6 +142,7 @@ class Stage1Trainer(BaseTrainer):
         val_frequency: int = 5,
         patience: int = 5,
         log_interval: int = 100,
+        weight_cont: float = 0.1,
         weight_rec: float = 1.0,
         weight_ref: float = 0.1,
         weight_ill: float = 0.1,
@@ -154,6 +161,7 @@ class Stage1Trainer(BaseTrainer):
             patience (int): Early-stopping patience.
             log_interval (int): Print batch loss every N iterations.
             weight_rec (float): Weight for reconstruction term in ctdn_loss.
+            weight_cont (float): Weight for content loss.
             weight_ref (float): Weight for reflectance-consistency term in ctdn_loss.
             weight_ill (float): Weight for illumination-smoothness term in ctdn_loss.
             lambda_g (float): Exponential weighting factor for gradient in ctdn_loss.
@@ -173,6 +181,7 @@ class Stage1Trainer(BaseTrainer):
         self.weight_rec = weight_rec
         self.weight_ref = weight_ref
         self.weight_ill = weight_ill
+        self.weight_cont = weight_cont
         self.lambda_g = lambda_g
 
         # Tracking best model
@@ -204,24 +213,31 @@ class Stage1Trainer(BaseTrainer):
             # 2) Gather R and L into a single tensor
             reflectances = []
             illuminations = []
+            decoder_recons = []
             for j in range(low_imgs.shape[1]):
-                reflectances.append(outputs_list[j]["R"])  # shape [B,3,H,W]
-                illuminations.append(outputs_list[j]["L"])
+                reflectances.append(outputs_list[j]["R"])  # shape [B, 3, H, W]
+                illuminations.append(outputs_list[j]["L"]) # shape [B, 3, H, W]
+                decoder_recons.append(outputs_list[j]["recon"]) # shape [B, 3, H, W]
             # Stack along dim=1 => shape [B,m,3,H,W]
             reflectances = torch.stack(reflectances, dim=1)
             illuminations = torch.stack(illuminations, dim=1)
+            reconstructions = torch.stack(decoder_recons, dim=1)
 
             # 3) Compute Stage1 CTDN loss
             loss_total = ctdn_loss(
                 reflectances, 
                 illuminations,
-                low_imgs,  # same low imgs for reconstruction
+                low_imgs,  
                 weight_rec=self.weight_rec,
                 weight_ref=self.weight_ref,
                 weight_ill=self.weight_ill,
                 lambda_g=self.lambda_g
             )
-
+            loss_con = content_loss(
+                reconstructions,
+                low_imgs
+            )
+            loss_total = loss_total + self.weight_cont * loss_con
             self.optimizer.zero_grad()
             loss_total.backward()
             self.optimizer.step()

@@ -73,6 +73,24 @@ def reflectance_consistency_loss(
     return loss_sum / max(pair_count, 1)
 
 
+def content_loss(
+    reconstructions: torch.Tensor,
+    input_images: torch.Tensor
+) -> torch.Tensor:
+    """
+    Implements Eq. (7) from the paper, "Content-Transfer Decomposition Network for Low-Light Image Enhancement":
+        L_con = sum_{i=1}^m || I_low^i - D( E(I_low^i) ) ||_2
+
+    Args:
+        Args:
+        reconstructions: Tensor of decoder outputs for each of the m sub-images, shape [B, m, 3, H, W].
+        input_images: The original low-light inputs, shape [B, m, 3, H, W].
+
+    Returns:
+        torch.Tensor: A scalar tensor representing the average L2 content loss.
+    """
+    return F.mse_loss(reconstructions, input_images, reduction='mean')
+
 
 def illumination_smoothness_loss(
     illuminations: torch.Tensor, 
@@ -118,7 +136,7 @@ def ctdn_loss(
     reflectances: torch.Tensor,   
     illuminations: torch.Tensor,    
     low_images: torch.Tensor,       
-    weight_rec: float = 1.0,
+    weight_rec: float = .1,
     weight_ref: float = 0.1,
     weight_ill: float = 0.01,
     lambda_g: float = 10

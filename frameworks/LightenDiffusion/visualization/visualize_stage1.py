@@ -72,6 +72,7 @@ def visualize_stage1_results_avg(stage1: torch.nn.Module,
     R_agg = torch.stack([out["R"] for out in outputs], dim=1).mean(dim=1)      # [B, 3, H, W]
     L_agg = torch.stack([out["L"] for out in outputs], dim=1).mean(dim=1)      # [B, 3, H, W]
     recon_agg = torch.stack([out["recon"] for out in outputs], dim=1).mean(dim=1)  # [B, 3, H, W]
+    RL_agg = R_agg * L_agg
     
     # Determine source (and possibly target) low image.
     if m == 2:
@@ -83,9 +84,9 @@ def visualize_stage1_results_avg(stage1: torch.nn.Module,
     num_to_vis = min(num_samples, B)
     # Determine number of columns.
     if m == 2:
-        num_cols = 6 if is_paired else 5
+        num_cols = 7 if is_paired else 6
     else:
-        num_cols = 5 if is_paired else 4
+        num_cols = 6 if is_paired else 5
 
     fig, axes = plt.subplots(num_to_vis, num_cols, figsize=(4 * num_cols, 4 * num_to_vis))
     if num_to_vis == 1:
@@ -118,13 +119,19 @@ def visualize_stage1_results_avg(stage1: torch.nn.Module,
         axes[i, col].axis("off")
         col += 1
 
-        # Column 5: Aggregated Reconstruction.
+        # Column 5: (R x L)
+        axes[i, col].imshow(tensor_to_image(RL_agg[i]))
+        axes[i, col].set_title("R x L")
+        axes[i, col].axis("off")
+        col += 1
+
+        # Column 6: Aggregated Reconstruction.
         axes[i, col].imshow(tensor_to_image(recon_agg[i]))
         axes[i, col].set_title("Reconstruction")
         axes[i, col].axis("off")
         col += 1
 
-        # Column 6: Ground Truth (if paired).
+        # Column 7: Ground Truth (if paired).
         if is_paired:
             axes[i, col].imshow(tensor_to_image(gt_batch[i]))
             axes[i, col].set_title("Ground Truth")
@@ -166,13 +173,15 @@ def visualize_stage1_results_individual(stage1: torch.nn.Module,
     # Get individual reconstructions.
     # all_recons shape: [m, B, 3, H, W]
     all_recons = torch.stack([out["recon"] for out in outputs], dim=0)
-    
+    all_R = torch.stack([out["R"] for out in outputs], dim=0)  # shape [m,B,3,H,W]
+    all_L = torch.stack([out["L"] for out in outputs], dim=0)
+
     # Use source low as the first low-quality image (or average if desired)
     source_low = sample_batch[:, 0, :, :, :]
 
     num_to_vis = min(num_samples, B)
     # Layout: 1 (source) + m (individual reconstructions) + (1 if paired ground truth)
-    num_cols = 1 + m + (1 if is_paired else 0)
+    num_cols = 1 + 2 * m + (1 if is_paired else 0)
 
     fig, axes = plt.subplots(num_to_vis, num_cols, figsize=(4 * num_cols, 4 * num_to_vis))
     if num_to_vis == 1:
@@ -193,7 +202,17 @@ def visualize_stage1_results_individual(stage1: torch.nn.Module,
             axes[i, col].set_title(f"Reconstruction {j+1}")
             axes[i, col].axis("off")
             col += 1
-        
+
+        # Next m columns: each direct R x L
+        for j in range(m):
+            R_ij = all_R[j, i]
+            L_ij = all_L[j, i]
+            RL_ij = R_ij * L_ij
+            axes[i, col].imshow(tensor_to_image(RL_ij))
+            axes[i, col].set_title(f"R x L {j+1}")
+            axes[i, col].axis("off")
+            col += 1
+            
         # Last column: Ground Truth (if available).
         if is_paired:
             axes[i, col].imshow(tensor_to_image(gt_batch[i]))
