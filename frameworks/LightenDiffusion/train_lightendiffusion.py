@@ -225,12 +225,7 @@ class Stage1Trainer(BaseTrainer):
             illuminations = torch.stack(illuminations, dim=1)    # shape [B, m, C, H/8, W/8]
             reconstructions = torch.stack(decoder_recons, dim=1) # shape [B, m, 3, H, W]
             encoded_features = torch.stack(encoded_features, dim=1) # shape [B, m, C, H/8, W/8]
-            
-            # For debugging
-            if i == 0:
-                print(f"reflectances: {reflectances.shape}, illuminations: {illuminations.shape}, "
-                      f"reconstructions: {reconstructions.shape}, encoded_features: {encoded_features.shape}")
-            
+                        
             loss_ctdn = ctdn_loss(
                 reflectances, 
                 illuminations,
@@ -275,13 +270,17 @@ Batch {i+1}/{len(self.train_loader)}: content loss = {avg_content_loss:.4f}, ctd
                 reflectances = []
                 illuminations = []
                 encoded_features = []
+
                 for j in range(low_imgs.shape[1]):
                     reflectances.append(outputs_list[j]["R"])
                     illuminations.append(outputs_list[j]["L"])
                     encoded_features.append(outputs_list[j]["f"])
+
                 reflectances = torch.stack(reflectances, dim=1)
                 illuminations = torch.stack(illuminations, dim=1)
                 encoded_features = torch.stack(encoded_features, dim=1)
+ 
+
 
                 loss_total = ctdn_loss(
                     reflectances, 

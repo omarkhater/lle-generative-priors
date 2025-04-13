@@ -71,8 +71,8 @@ def visualize_stage1_results_avg(stage1: torch.nn.Module,
         outputs = stage1(sample_batch)
     
     # Aggregate outputs by averaging over m low-quality images.
-    R_agg = torch.stack([out["R"] for out in outputs], dim=1).mean(dim=1)      # [B, 3, H, W]
-    L_agg = torch.stack([out["L"] for out in outputs], dim=1).mean(dim=1)      # [B, 3, H, W]
+    R_agg = torch.stack([out["R_rgb"] for out in outputs], dim=1).mean(dim=1)      # [B, 3, H, W]
+    L_agg = torch.stack([out["L_rgb"] for out in outputs], dim=1).mean(dim=1)      # [B, 3, H, W]
     recon_agg = torch.stack([out["recon"] for out in outputs], dim=1).mean(dim=1)  # [B, 3, H, W]
     RL_agg = R_agg * L_agg
     
@@ -177,15 +177,15 @@ def visualize_stage1_results_individual(stage1: torch.nn.Module,
     # Get individual reconstructions.
     # all_recons shape: [m, B, 3, H, W]
     all_recons = torch.stack([out["recon"] for out in outputs], dim=0)
-    all_R = torch.stack([out["R"] for out in outputs], dim=0)  # shape [m,B,3,H,W]
-    all_L = torch.stack([out["L"] for out in outputs], dim=0)
+    all_R = torch.stack([out["R_rgb"] for out in outputs], dim=0)  # shape [m,B,3,H,W]
+    all_L = torch.stack([out["L_rgb"] for out in outputs], dim=0)
 
     # Use source low as the first low-quality image (or average if desired)
     source_low = sample_batch[:, 0, :, :, :]
 
     num_to_vis = min(num_samples, B)
     # Layout: 1 (source) + m (individual reconstructions) + (1 if paired ground truth)
-    num_cols = 1 + 2 * m + (1 if is_paired else 0)
+    num_cols = 1 + 2*m + (1 if is_paired else 0)
 
     fig, axes = plt.subplots(num_to_vis, num_cols, figsize=(4 * num_cols, 4 * num_to_vis))
     if num_to_vis == 1:

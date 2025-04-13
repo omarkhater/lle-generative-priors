@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Tuple
+from typing import Tuple, List
 
 
 class Res_block(nn.Module):
@@ -9,7 +9,7 @@ class Res_block(nn.Module):
     Combines the learned transformation with a shortcut path.
     """
     def __init__(self, in_channels: int, out_channels: int) -> None:
-        super(Res_block, self).__init__()
+        super().__init__()
         sequence = []
         sequence += [
             nn.Conv2d(in_channels, out_channels, kernel_size=(3, 3), stride=(1, 1), padding=1),
@@ -33,36 +33,56 @@ class Res_block(nn.Module):
 
         return out
 
-class feature_pyramid(nn.Module):
+
+class FeaturePyramid(nn.Module):
     """
-    Extracts multi-scale feature maps using a sequence of convolutions and residual blocks.
+    Extracts a hierarchy of feature maps at progressively coarser spatial resolutions
+    and higher channel depths. It repeatedly extracts and down‐samples feature maps at multiple scales
+    using a series of convolutional layers and residual blocks.
+    The first two convolutional layers are used to process the input image.
+    The subsequent layers are organized into stages, each consisting of a residual block followed 
+    by a down-sampling convolution.
     """
-    def __init__(self, channels: int) -> None:
-        super(feature_pyramid, self).__init__()
-
-        self.convs = nn.Sequential(nn.Conv2d(3, channels, kernel_size=(5, 5), stride=(1, 1), padding=2),
-                                   nn.Conv2d(channels, channels, kernel_size=(5, 5), stride=(1, 1), padding=2))
-
-        self.block0 = Res_block(channels, channels)
-        self.down0 = nn.Conv2d(channels, channels, kernel_size=(3, 3), stride=(2, 2), padding=1)
-        self.block1 = Res_block(channels, channels * 2)
-        self.down1 = nn.Conv2d(channels * 2, channels * 2, kernel_size=(3, 3), stride=(2, 2), padding=1)
-        self.block2 = Res_block(channels * 2, channels * 4)
-        self.down2 = nn.Conv2d(channels * 4, channels * 4, kernel_size=(3, 3), stride=(2, 2), padding=1)
-        self.relu = nn.LeakyReLU()
-
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __init__(
+            self, 
+            base_channels: int, 
+            channel_factors: List[int] = [1, 2, 4], 
+            in_channels: int = 3
+        ) -> None:
         """
-        Forward pass for feature pyramid extraction.
-        
+        Args:
+            base_channels (int): Base number of channels for the pyramid.
+            channel_factors (List[int], optional): Multipliers defining the channels at each stage.
+            in_channels (int, optional): Number of input channels (default is 3).
+        """
+        super().__init__()
+        self.initial_convs = nn.Sequential(
+            nn.Conv2d(in_channels, base_channels, kernel_size=5, stride=1, padding=2),
+            nn.Conv2d(base_channels, base_channels, kernel_size=5, stride=1, padding=2)
+        )
+        self.levels = nn.ModuleList()
+        current_channels = base_channels
+        for factor in channel_factors:
+            target_channels = base_channels * factor
+            stage = nn.Sequential(
+                Res_block(current_channels, target_channels),
+                nn.Conv2d(target_channels, target_channels, kernel_size=3, stride=2, padding=1)
+            )
+            self.levels.append(stage)
+            current_channels = target_channels
+        self.activation = nn.LeakyReLU()
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, ...]:
+        """
         Args:
             x (torch.Tensor): Input image tensor.
-        
+            
         Returns:
-            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: Multi-scale feature maps (level0, level1, level2).
+            Tuple[torch.Tensor, ...]: A tuple of feature maps from each pyramid stage.
         """
-        level0 = self.down0(self.block0(self.convs(x)))
-        level1 = self.down1(self.block1(level0))
-        level2 = self.down2(self.block2(level1))
-
-        return level0, level1, level2
+        x = self.initial_convs(x)
+        features = []
+        for stage in self.levels:
+            x = stage(x)
+            features.append(x)
+        return tuple(features)
