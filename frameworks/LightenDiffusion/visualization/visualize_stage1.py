@@ -10,7 +10,7 @@ def tensor_to_image(t: torch.Tensor) -> np.ndarray:
     Convert a tensor of shape [3, H, W] with values in [0, 1] 
     to a NumPy array of shape [H, W, 3] (uint8).
     """
-    t = t.cpu().numpy().transpose(1, 2, 0)  # [H, W, 3]
+    t = t.detach().cpu().numpy().transpose(1, 2, 0)  # [H, W, 3]
     t = np.clip(t * 255, 0, 255).astype(np.uint8)
     return t
 

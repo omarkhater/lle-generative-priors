@@ -14,6 +14,7 @@ from .losses import (
 import traceback
 import torch.nn.functional as F
 from frameworks.LightenDiffusion.visualization.visualize_stage1 import visualize_stage1_results_individual, visualize_stage1_results_avg
+from frameworks.LightenDiffusion.visualization.visualize_stage2 import visualize_stage2_results
 
 class BaseTrainer:
     """
@@ -202,8 +203,8 @@ class Stage1Trainer(BaseTrainer):
         """
         self.model.train()
         running_loss = 0.0
-        
-        for i, (low_imgs, _) in enumerate(tqdm(self.train_loader, desc="Training Stage1", leave=False)):
+        pbar = tqdm(self.train_loader, desc="Training Stage1", leave=False)
+        for i, (low_imgs, _) in enumerate(pbar):
             low_imgs = low_imgs.to(self.device)  # shape [B, m, 3, H, W]
             
             # 1) Forward pass => list of length m
@@ -249,9 +250,8 @@ class Stage1Trainer(BaseTrainer):
                 avg_loss = running_loss / (i + 1)
                 avg_content_loss = loss_con.item()
                 avg_ctdn_loss = loss_ctdn.item()
-                tqdm.write(f"""
-Batch {i+1}/{len(self.train_loader)}: content loss = {avg_content_loss:.4f}, ctdn loss: {avg_ctdn_loss} , Total loss={avg_loss:.4f}""")
-
+                pbar.set_postfix(loss=f"{avg_loss:.4f}", content_loss=f"{avg_content_loss:.4f}", ctdn_loss=f"{avg_ctdn_loss:.4f}")
+        pbar.close()
         return running_loss / len(self.train_loader)
 
     def validate(self) -> float:
@@ -365,36 +365,27 @@ class Stage2Trainer(BaseTrainer):
     def train_epoch(self) -> float:
         self.model.train()
         running_loss = 0.0
-        for i, (low_imgs, high_imgs) in enumerate(tqdm(self.train_loader, desc="Training Stage2", leave=False)):
+        pbar = tqdm(self.train_loader, desc="Training Stage2", leave=False)
+        for i, (low_imgs, high_imgs) in enumerate(pbar):
             low_imgs = low_imgs.to(self.device)
             high_imgs = high_imgs.to(self.device)
-            low_imgs_R = low_imgs[:, 0:1, ...]
-            low_imgs_L = low_imgs[:, 1:2, ...]
-            out = self.model(low_imgs_R, low_imgs_L)
-            stage2_out = out["stage2"]
-            image_size = high_imgs.shape[-2:]
-            x0_resized = F.interpolate(
-                stage2_out["x0"], 
-                size= image_size, 
-                mode="bilinear", 
-                align_corners=False
-            )
-            target_noise = x0_resized - high_imgs
-            noise_pred_resized = F.interpolate(
-                stage2_out["noise_pred"], 
-                size=image_size, 
-                mode="bilinear", 
-                align_corners=False
-            )
-            diffusion_loss = noise_loss(noise_pred_resized, target_noise)
-            stage1_out = out["stage1_low"][0]
-            low_condition = stage1_out["f"]
-            restored_image_features = self.model.sample_reverse(low_condition,)
 
-            low_R = stage1_out["R"]
-            low_L = stage1_out["L"]
-            reference_fea = low_R * torch.pow(low_L, self.gamma)
-            scc_loss = self_constrained_consistency_loss(restored_image_features, reference_fea)
+            # Forward pass through the pipeline; Stage1 is frozen
+            outputs = self.model(low_imgs, high_imgs)
+
+            # Compute diffusion (noise) loss from Stage2 outputs
+            stage2_out = outputs["stage2"]
+            true_noise = stage2_out["noise"]      
+            pred_noise = stage2_out["noise_pred"]
+            diffusion_loss = noise_loss(pred_noise, true_noise)
+
+            # Use aggregated low decompositions from Stage1 for conditioning
+            aggregated_low = outputs["stage1_low"]  # dict with keys "f", "R", "L"
+            low_condition = aggregated_low["f"]
+            restored_features = self.model.sample_reverse(low_condition)
+            reference_feature = aggregated_low["R"] * torch.pow(aggregated_low["L"], self.gamma)
+
+            scc_loss = self_constrained_consistency_loss(restored_features, reference_feature)
             total_loss = self.criterion(diffusion_loss, scc_loss, self.lambda_scc)
             self.optimizer.zero_grad()
             total_loss.backward()
@@ -403,7 +394,9 @@ class Stage2Trainer(BaseTrainer):
             running_loss += total_loss.item()
             if (i + 1) % self.log_interval == 0:
                 avg_loss = running_loss / (i + 1)
-                tqdm.write(f"  Batch {i+1}/{len(self.train_loader)}, loss = {avg_loss:.4f}")
+                pbar.set_postfix(loss=f"{avg_loss:.4f}", diffusion_loss=f"{diffusion_loss.item():.4f}", scc_loss=f"{scc_loss.item():.4f}")
+        pbar.close()
+        
         return running_loss / len(self.train_loader)
 
     def validate(self) -> float:
@@ -413,34 +406,26 @@ class Stage2Trainer(BaseTrainer):
             for low_imgs, high_imgs in self.val_loader:
                 low_imgs = low_imgs.to(self.device)
                 high_imgs = high_imgs.to(self.device)
-                low_imgs_R = low_imgs[:, 0:1, ...]
-                low_imgs_L = low_imgs[:, 1:2, ...]
-                out = self.model(low_imgs_R, low_imgs_L)
-                stage2_out = out["stage2"]
-                image_size = high_imgs.shape[-2:]
-                x0_resized = F.interpolate(
-                    stage2_out["x0"], 
-                    size= image_size, 
-                    mode="bilinear", 
-                    align_corners=False
-                )
-                target_noise = x0_resized - high_imgs
-                noise_pred_resized = F.interpolate(
-                    stage2_out["noise_pred"], 
-                    size=image_size, 
-                    mode="bilinear", 
-                    align_corners=False
-                )
-                target_noise = x0_resized- high_imgs
-                diffusion_loss = noise_loss(noise_pred_resized, target_noise)
-                stage1_out = out["stage1_low"][0]
-                low_condition = stage1_out["f"]
-                restored_image_features = self.model.sample_reverse(low_condition)
-                low_R = stage1_out["R"]
-                low_L = stage1_out["L"]
-                reference_fea = low_R * torch.pow(low_L, self.gamma)
-                scc_loss = self_constrained_consistency_loss(restored_image_features, reference_fea)
+                outputs = self.model(low_imgs, high_imgs)
+                stage2_out = outputs["stage2"]
+
+
+                true_noise = stage2_out["noise"]
+                pred_noise = stage2_out["noise_pred"]
+                diffusion_loss = noise_loss(pred_noise, true_noise)
+
+
+                aggregated_low = outputs["stage1_low"]
+                low_condition = aggregated_low["f"]
+                restored_features = self.model.sample_reverse(low_condition)
+                reference_feature = aggregated_low["R"] * torch.pow(aggregated_low["L"], self.gamma)
+                scc_loss = self_constrained_consistency_loss(restored_features, reference_feature)
+
                 total_loss = self.criterion(diffusion_loss, scc_loss, self.lambda_scc)
                 running_loss += total_loss.item()
-        return running_loss / len(self.val_loader)
+        
+        avg_loss = running_loss / len(self.val_loader)
+        print("Visualizing Stage2 results")
+        visualize_stage2_results(self.model, self.val_loader, num_samples=2)
+        return avg_loss
 

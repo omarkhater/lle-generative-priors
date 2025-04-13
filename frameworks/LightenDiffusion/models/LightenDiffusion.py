@@ -7,6 +7,7 @@ from .unet import DiffusionUNet
 from ..utils.sampling import data_transform, inverse_data_transform
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from .utils import VisualizationMapper
 
 class Stage1(nn.Module):
     """
@@ -273,7 +274,7 @@ class Stage2(nn.Module):
         seq_next = [-1] + seq[:-1]
         alphas = 1.0 - self.betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
-        for i, j in zip(reversed(seq), reversed(seq_next)):
+        for i, j in tqdm(zip(reversed(seq), reversed(seq_next)), total=len(seq), desc="Reverse Sampling", leave=False):
             t = torch.full((B,), i, dtype=torch.long, device=device)
             next_t = torch.full((B,), j, dtype=torch.long, device=device)
             at = alphas_cumprod[t].view(B, 1, 1, 1)
@@ -297,15 +298,69 @@ class LightenDiffusionPipeline(nn.Module):
     It allows flexible usage of multi-image inputs for low-light (and high-light) and
     produces the outputs necessary for training and evaluation.
     """
-    def __init__(self, stage1: Stage1, stage2: Stage2) -> None:
+    def __init__(
+            self, 
+            stage1: Stage1, 
+            stage2: Stage2,
+            aggregation_mode: str = "mean",
+            VisualizationMapper: Optional[VisualizationMapper] = None
+        ) -> None:
         """
         Args:
             stage1 (Stage): Module for decomposing images.
             stage2 (Stage2): Module for the diffusion process.
+            VisualizationMapper (Optional[VisualizationMapper]): Optional visualization mapper for output images.
         """
         super().__init__()
         self.stage1 = stage1
         self.stage2 = stage2
+        self.VisualizationMapper = VisualizationMapper
+        self.aggregation_mode = aggregation_mode
+
+        for param in self.stage1.parameters():
+            param.requires_grad = False
+    
+    def aggregate_decompositions(self, decomp_list: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        """
+        Aggregates a list of Stage1 output dictionaries (for each sub-image) into a single dictionary.
+        Keys 'f', 'R', and 'L' are aggregated along the sub-image dimension according to the selected mode.
+        The aggregation modes are:
+            - "mean": Average across sub-images.
+            - "max": Maximum across sub-images.
+            - "first": Use the first sub-image as is.
+        
+        Args:
+            decomp_list (List[Dict[str, Tensor]]): List of decompositions for m sub-images.
+        
+        Returns:
+            Dict[str, Tensor]: Aggregated outputs for keys 'f', 'R', and 'L'.
+        """
+        aggregated = {}
+        for key in ['f', 'R', 'L', "features"]:
+            if key == "features":
+                # Handle tuple of multi-scale skip features
+                num_scales = len(decomp_list[0]["features"])
+                aggregated_features = []
+                for i in range(num_scales):
+                    scale_list = [out["features"][i] for out in decomp_list]
+                    stacked = torch.stack(scale_list, dim=1)  # Shape: [B, m, ...]
+                    if self.aggregation_mode == "mean":
+                        aggregated_features.append(stacked.mean(dim=1))
+                    elif self.aggregation_mode == "max":
+                        aggregated_features.append(stacked.max(dim=1)[0])
+                    else:
+                        aggregated_features.append(stacked[:, 0])
+                aggregated[key] = tuple(aggregated_features)
+            else:
+                tensor_list = [out[key] for out in decomp_list]
+                stacked = torch.stack(tensor_list, dim=1)
+                if self.aggregation_mode == "mean":
+                    aggregated[key] = stacked.mean(dim=1)
+                elif self.aggregation_mode == "max":
+                    aggregated[key] = stacked.max(dim=1)[0]
+                else:
+                    aggregated[key] = stacked[:, 0]
+        return aggregated
 
     def forward(
         self,
@@ -314,9 +369,10 @@ class LightenDiffusionPipeline(nn.Module):
     ) -> Dict[str, Any]:
         """
         Performs a full forward pass of the pipeline.
-          - Decomposes low-light images using Stage1.
-          - If high-light images are provided, decomposes them as well.
-          - Uses one representative sub-image from low and high to run Stage2 diffusion.
+          - Decomposes low-light & high-light images using Stage1.
+          - Aggregates the decompositions for low-light images.
+          - Computes the diffusion process using Stage2.
+
 
         Args:
             inputs_low (torch.Tensor): Tensor with shape [B, m, 3, H, W] for low-light images.
@@ -328,27 +384,29 @@ class LightenDiffusionPipeline(nn.Module):
                 - "stage1_high": (Optional) Decomposition outputs from high-light images.
                 - "stage2": Diffusion outputs.
         """
-        outputs: Dict[str, Any] = {}
-        low_decomp = self.stage1(inputs_low)
-        outputs["stage1_low"] = low_decomp
+        outputs = {}
+        with torch.no_grad():
+            low_decomp_list = self.stage1(inputs_low)  # List of m dicts (each with keys 'f', 'R', 'L', etc.)
+            aggregated_low = self.aggregate_decompositions(low_decomp_list)
+        outputs["stage1_low"] = aggregated_low
 
-        if inputs_high is None:
-            return outputs
+        if inputs_high is not None:
+            inputs_high_expanded = inputs_high.unsqueeze(1) # [B, C, H, W] --> [B, 1, C, H, W]
+            with torch.no_grad():
+                high_decomp_list = self.stage1(inputs_high_expanded)
+                # Since m == 1, take the first (and only) dictionary
+                high_decomp = high_decomp_list[0]
+            outputs["stage1_high"] = high_decomp
 
-        high_decomp = self.stage1(inputs_high)
-        outputs["stage1_high"] = high_decomp
-        R_low = low_decomp[0]["R"]
-        L_low = low_decomp[0]["L"]
-        R_high = high_decomp[0]["R"]
-        L_high = high_decomp[0]["L"]
+            # Stage2 (Diffusion): use aggregated low reflectance and high illumination.
+            diffusion_output = self.stage2(
+                R_low=aggregated_low["R"],
+                L_high=high_decomp["L"],
+                R_condition=aggregated_low["R"],
+                L_for_scc=aggregated_low["L"]
+            )
+            outputs["stage2"] = diffusion_output
 
-        diffusion_output = self.stage2(
-            R_low=R_low,
-            L_high=L_high,
-            R_condition=R_low,
-            L_for_scc=L_low
-        )
-        outputs["stage2"] = diffusion_output
         return outputs
 
     def sample_reverse(
@@ -372,7 +430,10 @@ class LightenDiffusionPipeline(nn.Module):
             eta
         )
     
-    def predict(self, input_low: torch.Tensor) -> torch.Tensor:
+    def predict(
+            self, 
+            input_low: torch.Tensor,
+        ) -> torch.Tensor:
         """
         Enhance a set of low-light images and return the final enhanced output.
         Instead of selecting only the first sub-image, this method aggregates across all
@@ -386,28 +447,25 @@ class LightenDiffusionPipeline(nn.Module):
         """
         self.eval()
         with torch.no_grad():
-            stage1_outputs = self.stage1(input_low)
-            # Collect and average all features across sub-images
-            f_list = [out["f"] for out in stage1_outputs]
-            f_agg = torch.stack(f_list, dim=0).mean(dim=0)
-            
-            # Collect and average all skip features across sub-images
-            # Each outputs["features"] is a tuple of skip features
-            all_features = [out["features"] for out in stage1_outputs]
-            
-            # For each level in the skip features, average across sub-images
-            skip_features_avg = []
-            for level in range(len(all_features[0])):
-                level_features = [features[level] for features in all_features]
-                level_avg = torch.stack(level_features, dim=0).mean(dim=0)
-                skip_features_avg.append(level_avg)
-            
-            # Process through diffusion pipeline
-            f_trans = data_transform(f_agg)
+            low_decomp_list = self.stage1(input_low)
+            aggregated_low = self.aggregate_decompositions(low_decomp_list)
+            f_trans = data_transform(aggregated_low["f"])
             restored_latent = self.stage2.sample_reverse(f_trans)
             restored_latent = inverse_data_transform(restored_latent)
-            
-            # Generate final enhanced image
-            enhanced_image = self.stage1.decoder(restored_latent, *skip_features_avg)
+            enhanced_image = self.stage1.decoder(restored_latent, *aggregated_low.get("features"))
             return enhanced_image
-
+        
+    def map_to_rgb(self, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Maps an arbitrary tensor of shape [B, C, H, W] into an RGB tensor [B, 3, H, W]
+        using the provided visualization mapper.
+        
+        Args:
+            tensor (torch.Tensor): Input tensor with any number of channels.
+        
+        Returns:
+            torch.Tensor: Output tensor with 3 channels.
+        """
+        if self.VisualizationMapper is None:
+            raise ValueError("Visualization mapper is not set in the pipeline.")
+        return self.VisualizationMapper(tensor)
