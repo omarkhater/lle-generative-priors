@@ -13,7 +13,7 @@ from .losses import (
 )
 import traceback
 import torch.nn.functional as F
-from frameworks.LightenDiffusion.visualization.visualize_stage1 import visualize_stage1_results_individual, visualize_stage1_results_avg
+from frameworks.LightenDiffusion.visualization.visualize_stage1 import visualize_stage1_results
 from frameworks.LightenDiffusion.visualization.visualize_stage2 import visualize_stage2_results
 
 class BaseTrainer:
@@ -295,10 +295,7 @@ class Stage1Trainer(BaseTrainer):
 
         avg_loss = running_loss / len(self.val_loader)
 
-        print("Visualizing Stage1 results using individual reconstructions...")
-        visualize_stage1_results_individual(self.model, self.val_loader, num_samples=2)
-        print("Visualizing Stage1 results using average reconstruction...")
-        visualize_stage1_results_avg(self.model, self.val_loader, num_samples=2)
+        visualize_stage1_results(self.model, self.val_loader, num_samples=2)
         return avg_loss
 
 class Stage2Trainer(BaseTrainer):
