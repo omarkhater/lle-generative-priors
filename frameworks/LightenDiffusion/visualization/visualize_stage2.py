@@ -4,7 +4,8 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 from typing import Tuple, Optional, List
 
-from .visualize_stage1 import tensor_to_image, get_visualization_batch
+from .visualize_stage1 import tensor_to_image
+from .visualization_utils import map_to_rgb
 
 def select_visualization_indices(batch_size: int, num_samples: int, seed: int) -> List[int]:
     """
@@ -50,7 +51,7 @@ def visualize_stage2_results_aggregate(
          - \(I_{\mathrm{low}}^{\hat{}}\): the final enhanced output image.
     
     All latent outputs (which are of low resolution, e.g. 32×32) are processed in batch
-    through pipeline.map_to_rgb.
+    through map_to_rgb.
     
     Args:
         pipeline (torch.nn.Module): The full LightenDiffusionPipeline model.
@@ -111,18 +112,17 @@ def visualize_stage2_results_aggregate(
 
     # Process latent outputs in batch via map_to_rgb.
     # Each call below returns a tensor of shape [nvis, 3, h, w].
-    mapped_f_low   = pipeline.map_to_rgb(f_low)
-    mapped_f_high  = pipeline.map_to_rgb(f_high)
-    mapped_R_low   = pipeline.map_to_rgb(R_low)
-    mapped_R_high  = pipeline.map_to_rgb(R_high)
-    mapped_L_low   = pipeline.map_to_rgb(L_low)
-    mapped_L_high  = pipeline.map_to_rgb(L_high)
-    mapped_x0      = pipeline.map_to_rgb(x0)
-    mapped_x_t     = pipeline.map_to_rgb(x_t)
-    mapped_x_hat_t = pipeline.map_to_rgb(x_hat_t)
-    mapped_ref_f   = pipeline.map_to_rgb(ref_f)
+    mapped_f_low   = map_to_rgb(f_low)
+    mapped_f_high  = map_to_rgb(f_high)
+    mapped_R_low   = map_to_rgb(R_low)
+    mapped_R_high  = map_to_rgb(R_high)
+    mapped_L_low   = map_to_rgb(L_low)
+    mapped_L_high  = map_to_rgb(L_high)
+    mapped_x0      = map_to_rgb(x0)
+    mapped_x_t     = map_to_rgb(x_t)
+    mapped_x_hat_t = map_to_rgb(x_hat_t)
+    mapped_ref_f   = map_to_rgb(ref_f)
 
-    # Bring outputs to CPU.
     def to_cpu(t: torch.Tensor) -> torch.Tensor:
         return t.detach().cpu()
 
