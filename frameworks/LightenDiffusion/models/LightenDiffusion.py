@@ -30,14 +30,6 @@ class Stage1(nn.Module):
         self.encoder = encoder
         self.decomposer = decomposer
         self.decoder = decoder
-        self.to_rgb = nn.Conv2d(
-            in_channels=encoder.encoded_channels,
-            out_channels=3,
-            kernel_size=1,
-            stride=1,
-            padding=0,
-            bias=True
-        )
 
     def _process_sample(self, img: torch.Tensor) -> Dict[str, Any]:
         """
@@ -302,8 +294,7 @@ class LightenDiffusionPipeline(nn.Module):
             self, 
             stage1: Stage1, 
             stage2: Stage2,
-            aggregation_mode: str = "mean",
-            VisualizationMapper: Optional[VisualizationMapper] = None
+            aggregation_mode: str = "mean"
         ) -> None:
         """
         Args:
@@ -314,7 +305,6 @@ class LightenDiffusionPipeline(nn.Module):
         super().__init__()
         self.stage1 = stage1
         self.stage2 = stage2
-        self.VisualizationMapper = VisualizationMapper
         self.aggregation_mode = aggregation_mode
 
         for param in self.stage1.parameters():
@@ -457,15 +447,44 @@ class LightenDiffusionPipeline(nn.Module):
         
     def map_to_rgb(self, tensor: torch.Tensor) -> torch.Tensor:
         """
-        Maps an arbitrary tensor of shape [B, C, H, W] into an RGB tensor [B, 3, H, W]
-        using the provided visualization mapper.
-        
+        Maps an input tensor of shape [B, C, H, W] to an RGB tensor [B, 3, H, W]
+        by projecting the C channels onto the top three principal components using PCA.
+        For each sample, the PCA projection is then min–max normalized to [0, 1].
+
         Args:
-            tensor (torch.Tensor): Input tensor with any number of channels.
-        
+            tensor (torch.Tensor): Input tensor of shape [B, C, H, W].
+
         Returns:
-            torch.Tensor: Output tensor with 3 channels.
+            torch.Tensor: Output RGB tensor of shape [B, 3, H, W].
         """
-        if self.VisualizationMapper is None:
-            raise ValueError("Visualization mapper is not set in the pipeline.")
-        return self.VisualizationMapper(tensor)
+        B, C, H, W = tensor.shape
+        output = torch.zeros((B, 3, H, W), device=tensor.device)
+        
+        for b in range(B):
+            # Reshape sample to shape (C, H*W)
+            sample = tensor[b]  # shape: [C, H, W]
+            X = sample.reshape(C, -1)  # shape: [C, N] where N = H*W
+            
+            # Center the data
+            mean = X.mean(dim=1, keepdim=True)
+            X_centered = X - mean
+
+            # Perform singular value decomposition
+            # U: (C, C), S: (min(C, N)), Vh: (min(C, N), N)
+            U, S, Vh = torch.linalg.svd(X_centered, full_matrices=False)
+            
+            # Take the top 3 principal components from U
+            W_pca = U[:, :3]  # shape: [C, 3]
+            
+            # Project the centered data onto the top 3 components
+            X_proj = torch.matmul(W_pca.T, X_centered)  # shape: [3, N]
+            X_proj = X_proj.reshape(3, H, W)
+            
+            # Normalize the projected output to [0, 1]
+            X_min = X_proj.min()
+            X_max = X_proj.max()
+            X_norm = (X_proj - X_min) / (X_max - X_min + 1e-6)
+            
+            output[b] = X_norm
+
+        return output
