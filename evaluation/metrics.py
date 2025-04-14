@@ -3,6 +3,7 @@ from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 import lpips
 import torch
 import pyiqa
+import traceback
 
 def to_numpy(image_tensor: torch.Tensor) -> np.ndarray:
     """
@@ -105,6 +106,7 @@ def compute_lpips(gt: torch.Tensor, pred: torch.Tensor, net_type: str = 'alex') 
         return dist.item()
     except Exception as e:
         print(f"Error computing LPIPS: {e}")
+        print(traceback.format_exc())
         return float('inf')
 
 def compute_niqe(image_tensor: torch.Tensor) -> float:
