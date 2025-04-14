@@ -426,6 +426,6 @@ class Stage2Trainer(BaseTrainer):
         
         avg_loss = running_loss / len(self.val_loader)
         print("Visualizing Stage2 results")
-        visualize_stage2_results(self.model, self.val_loader, num_samples=2)
+        visualize_stage2_results(self.model, self.val_loader, num_samples=1)
         return avg_loss
 

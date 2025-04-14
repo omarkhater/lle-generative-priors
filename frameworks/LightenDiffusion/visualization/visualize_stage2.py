@@ -1,149 +1,226 @@
 import torch
 import matplotlib.pyplot as plt
-import numpy as np
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
+
 from .visualize_stage1 import tensor_to_image, get_visualization_batch
 
-def _get_stage2_data(pipeline: torch.nn.Module, data_loader: DataLoader, is_paired: bool, seed: int = 42) -> Tuple[dict, Optional[torch.Tensor]]:
-    torch.manual_seed(seed)
-    pipeline.eval()
-    device = next(pipeline.parameters()).device
-    sample_batch, gt_batch = get_visualization_batch(data_loader, is_paired, device)
-    with torch.no_grad():
-        outputs = pipeline(sample_batch, gt_batch) if gt_batch is not None else pipeline(sample_batch)
-        stage2_out = outputs.get("stage2", None)
-        if stage2_out is None:
-            raise ValueError("Stage2 outputs not found in pipeline results.")
-    return stage2_out, sample_batch, gt_batch
-
-def visualize_stage2_results_aggregate(pipeline: torch.nn.Module,
-                                       data_loader: DataLoader,
-                                       num_samples: int = 8,
-                                       is_paired: bool = True,
-                                       seed: int = 42) -> None:
+def select_visualization_indices(batch_size: int, num_samples: int, seed: int) -> List[int]:
     """
-    Visualize aggregated outputs from the Stage2 diffusion process by averaging 
-    over a batch of samples. The following outputs are aggregated and then visualized:
-      - x0, x_t, noise, noise_pred, noise difference, reference feature,
-        R_low, L_high, and Ground Truth High (if available).
-    All latent outputs are mapped to RGB.
-
-    Args:
-        pipeline (torch.nn.Module): The full LightenDiffusion pipeline containing Stage2 and map_to_rgb.
-        data_loader (DataLoader): DataLoader yielding paired (x, y) batches or unpaired.
-        num_samples (int): (Unused here but kept for interface consistency) Number of samples for visualization.
-        is_paired (bool): Whether ground truth high images are provided.
-        seed (int): Random seed for reproducibility.
-    """
-    stage2_out, _, gt_batch= _get_stage2_data(pipeline, data_loader, is_paired, seed)
-
-    # Extract outputs.
-    x0 = stage2_out["x0"]
-    x_t = stage2_out["x_t"]
-    noise = stage2_out["noise"]
-    noise_pred = stage2_out["noise_pred"]
-    reference_feature = stage2_out["reference_feature"]
-    R_low = stage2_out["R_low"]
-    L_high = stage2_out["L_high"]
-
-    # Aggregate by averaging over the batch dimension.
-    x0_avg = torch.mean(x0, dim=0, keepdim=True)
-    x_t_avg = torch.mean(x_t, dim=0, keepdim=True)
-    noise_avg = torch.mean(noise, dim=0, keepdim=True)
-    noise_pred_avg = torch.mean(noise_pred, dim=0, keepdim=True)
-    noise_diff_avg = torch.mean(torch.abs(noise - noise_pred), dim=0, keepdim=True)
-    reference_avg = torch.mean(reference_feature, dim=0, keepdim=True)
-    R_low_avg = torch.mean(R_low, dim=0, keepdim=True)
-    L_high_avg = torch.mean(L_high, dim=0, keepdim=True)
-    gt_avg = torch.mean(gt_batch, dim=0, keepdim=True) if (is_paired and gt_batch is not None) else None
-
-    # Map aggregated outputs to RGB.
-    x0_rgb = pipeline.map_to_rgb(x0_avg)
-    x_t_rgb = pipeline.map_to_rgb(x_t_avg)
-    noise_rgb = pipeline.map_to_rgb(noise_avg)
-    noise_pred_rgb = pipeline.map_to_rgb(noise_pred_avg)
-    noise_diff_rgb = pipeline.map_to_rgb(noise_diff_avg)
-    reference_rgb = pipeline.map_to_rgb(reference_avg)
-    R_low_rgb = pipeline.map_to_rgb(R_low_avg)
-    L_high_rgb = pipeline.map_to_rgb(L_high_avg)
-    if gt_avg is not None:
-        # Assuming ground truth high images are already in RGB space.
-        gt_rgb = gt_avg
-
-    num_cols = 9 if is_paired else 8
-    fig, axes = plt.subplots(1, num_cols, figsize=(3 * num_cols, 3))
-    col = 0
-    axes[col].imshow(tensor_to_image(x0_rgb[0]))
-    axes[col].set_title("x0 (Composite)")
-    axes[col].axis("off")
-    col += 1
-
-    axes[col].imshow(tensor_to_image(x_t_rgb[0]))
-    axes[col].set_title("x_t (Noised)")
-    axes[col].axis("off")
-    col += 1
-
-    axes[col].imshow(tensor_to_image(noise_rgb[0]))
-    axes[col].set_title("Noise")
-    axes[col].axis("off")
-    col += 1
-
-    axes[col].imshow(tensor_to_image(noise_pred_rgb[0]))
-    axes[col].set_title("Noise Pred")
-    axes[col].axis("off")
-    col += 1
-
-    axes[col].imshow(tensor_to_image(noise_diff_rgb[0]))
-    axes[col].set_title("Noise Diff")
-    axes[col].axis("off")
-    col += 1
-
-    axes[col].imshow(tensor_to_image(reference_rgb[0]))
-    axes[col].set_title("Reference")
-    axes[col].axis("off")
-    col += 1
-
-    axes[col].imshow(tensor_to_image(R_low_rgb[0]))
-    axes[col].set_title("R_low")
-    axes[col].axis("off")
-    col += 1
-
-    axes[col].imshow(tensor_to_image(L_high_rgb[0]))
-    axes[col].set_title("L_high")
-    axes[col].axis("off")
-    col += 1
-
-    if is_paired:
-        axes[col].imshow(tensor_to_image(gt_rgb[0]))
-        axes[col].set_title("GT High")
-        axes[col].axis("off")
-
-    plt.tight_layout()
-    plt.show()
-
-
-def visualize_stage2_results(pipeline: torch.nn.Module,
-                             data_loader: DataLoader,
-                             num_samples: int = 8,
-                             is_paired: bool = True,
-                             approach: str = "aggregate") -> None:
-    """
-    Top-level visualization function for Stage2 diffusion outputs.
-    Supports two approaches:
-
-        - 'aggregate': Visualizes the average (aggregated) output over a batch.
+    Selects a list of random indices from a batch given a seed.
     
     Args:
-        pipeline (torch.nn.Module): The full LightenDiffusion pipeline (with Stage2 and map_to_rgb).
-        data_loader (DataLoader): DataLoader yielding (low, high) batches in paired mode or (low,) otherwise.
-        num_samples (int): Number of samples (rows) to visualize for the individual mode.
-        is_paired (bool): Whether ground truth high images are provided.
-        approach (str): Either "individual" or "aggregate" visualization mode.
+        batch_size (int): Number of samples in the batch.
+        num_samples (int): Number of sample indices to select.
+        seed (int): Random seed for reproducibility.
+    
+    Returns:
+        List[int]: List of selected indices.
     """
+    import random
+    random.seed(seed)
+    indices = list(range(batch_size))
+    random.shuffle(indices)
+    return indices[:min(num_samples, batch_size)]
 
-    if approach.lower() == "aggregate":
-        visualize_stage2_results_aggregate(pipeline, data_loader, num_samples, is_paired)
+def visualize_stage2_results_aggregate(
+    pipeline: torch.nn.Module,
+    data_loader: DataLoader,
+    num_samples: int = 1,
+    random_seed: int = 42
+) -> None:
+    """
+    Visualizes aggregated outputs from the Stage2 diffusion process along with the final
+    enhanced image. The visualization shows:
+    
+      Row 1: 
+         - \(I_{\mathrm{low}}\): the input low-light image(s). If m == 2, both sub-images are concatenated;
+           otherwise, the first one is shown.
+         - \(I_{\mathrm{high}}\): the ground-truth high-light image.
+         - \(F_{\mathrm{low}}\) and \(F_{\mathrm{high}}\): encoded features (projected to RGB using PCA).
+    
+      Row 2: 
+         - \(R_{\mathrm{low}}, R_{\mathrm{high}}, L_{\mathrm{low}}, L_{\mathrm{high}}\): decomposition outputs (RGB).
+    
+      Row 3: 
+         - \(x_{0}, x_{t}, \hat{x}_{t}, x_{0}(F_{\mathrm{low}}^{\hat{}})\): the key latent terms in the diffusion model.
+    
+      Row 4: 
+         - \(I_{\mathrm{low}}^{\hat{}}\): the final enhanced output image.
+    
+    All latent outputs (which are of low resolution, e.g. 32×32) are processed in batch
+    through pipeline.map_to_rgb.
+    
+    Args:
+        pipeline (torch.nn.Module): The full LightenDiffusionPipeline model.
+        data_loader (DataLoader): Dataloader yielding paired (x, y) batches (x: [B, m, 3, H, W]; y: [B, 3, H, W]).
+        num_samples (int): Number of samples from the batch to visualize.
+        random_seed (int): Seed for random selection of samples.
+    """
+    # Get a single batch.
+    batch_iter = iter(data_loader)
+    x, y = next(batch_iter)
+    device = next(pipeline.parameters()).device
+    x = x.to(device)  # low-light images: [B, m, 3, H, W]
+    y = y.to(device)  # high-light images: [B, 3, H, W]
+    B, m, _, H, W = x.shape
+
+    # Select indices.
+    sel_indices = select_visualization_indices(B, num_samples, random_seed)
+    sel_idx_tensor = torch.tensor(sel_indices, device=device)
+
+    # Forward pass through the pipeline.
+    with torch.no_grad():
+        outputs = pipeline(x, y)
+        stage1_low = outputs["stage1_low"]      # Aggregated low decomposition.
+        stage1_high = outputs["stage1_high"]    # High decomposition (from a singleton input).
+        stage2_out  = outputs["stage2"]
+
+    # Unpack Stage1 outputs (latent variables: sizes such as [B, 3, 32, 32]).
+    # For each tensor, use advanced indexing to select a batch of selected samples.
+    R_low  = stage1_low["R"][sel_idx_tensor]  
+    L_low  = stage1_low["L"][sel_idx_tensor]
+    f_low  = stage1_low["f"][sel_idx_tensor]
+    # For high, we get from stage1_high (assumed shape [B, 3, h, w]).
+    R_high = stage1_high["R"][sel_idx_tensor]
+    L_high = stage1_high["L"][sel_idx_tensor]
+    f_high = stage1_high["f"][sel_idx_tensor]
+
+    # Unpack Stage2 outputs (latent outputs).
+    x0    = stage2_out["x0"][sel_idx_tensor]                  # Composite: R_low * L_high.
+    x_t   = stage2_out["x_t"][sel_idx_tensor]                  # Noised version.
+    ref_f = stage2_out["reference_feature"][sel_idx_tensor]    # R_low * (L_low^gamma).
+
+    # Reverse diffusion on f_low yields x̂_t.
+    with torch.no_grad():
+        x_hat_t = pipeline.sample_reverse(f_low)  # Processes batch: shape [nvis, 3, h, w].
+
+    # Final enhanced image (decoded from restored latent features); shape [B, 3, H, W].
+    I_hat_low = pipeline.predict(x)[sel_idx_tensor]
+
+    # For the original I_low images:
+    # If m == 2, concatenate the two sub-images horizontally; otherwise, use the first sub-image.
+    if m == 2:
+        I_low_all = torch.cat([x[:,0], x[:,1]], dim=-1)  # Now shape: [B, 3, H, 2*W].
     else:
-        raise ValueError("Invalid approach. Use 'aggregate' for aggregated visualization.")
+        I_low_all = x[:,0]  # shape: [B, 3, H, W].
+    selected_I_low = I_low_all[sel_idx_tensor]
+    # The high-light input remains as y (shape [B, 3, H, W]).
+    selected_I_high = y[sel_idx_tensor]
+
+    # Process latent outputs in batch via map_to_rgb.
+    # Each call below returns a tensor of shape [nvis, 3, h, w].
+    mapped_f_low   = pipeline.map_to_rgb(f_low)
+    mapped_f_high  = pipeline.map_to_rgb(f_high)
+    mapped_R_low   = pipeline.map_to_rgb(R_low)
+    mapped_R_high  = pipeline.map_to_rgb(R_high)
+    mapped_L_low   = pipeline.map_to_rgb(L_low)
+    mapped_L_high  = pipeline.map_to_rgb(L_high)
+    mapped_x0      = pipeline.map_to_rgb(x0)
+    mapped_x_t     = pipeline.map_to_rgb(x_t)
+    mapped_x_hat_t = pipeline.map_to_rgb(x_hat_t)
+    mapped_ref_f   = pipeline.map_to_rgb(ref_f)
+
+    # Bring outputs to CPU.
+    def to_cpu(t: torch.Tensor) -> torch.Tensor:
+        return t.detach().cpu()
+
+    selected_I_low  = to_cpu(selected_I_low)
+    selected_I_high = to_cpu(selected_I_high)
+    mapped_f_low    = to_cpu(mapped_f_low)
+    mapped_f_high   = to_cpu(mapped_f_high)
+    mapped_R_low    = to_cpu(mapped_R_low)
+    mapped_R_high   = to_cpu(mapped_R_high)
+    mapped_L_low    = to_cpu(mapped_L_low)
+    mapped_L_high   = to_cpu(mapped_L_high)
+    mapped_x0       = to_cpu(mapped_x0)
+    mapped_x_t      = to_cpu(mapped_x_t)
+    mapped_x_hat_t  = to_cpu(mapped_x_hat_t)
+    mapped_ref_f    = to_cpu(mapped_ref_f)
+    selected_I_hat  = to_cpu(I_hat_low)
+
+    # Create a grid of subplots.
+    num_cols = 4
+    imgs_per_row = 4
+    for i in range(len(sel_indices)):
+        fig, axes = plt.subplots(imgs_per_row, num_cols, figsize=(3*num_cols, 3*imgs_per_row))
+        fig.suptitle(f"Sample {sel_indices[i]}", fontsize=16)
+
+        # Row 1: I_low, I_high, F_low, F_high.
+        axes[0, 0].imshow(tensor_to_image(selected_I_low[i]))
+        axes[0, 0].set_title(r"$I_{\mathrm{low}}$")
+        axes[0, 0].axis("off")
+
+        axes[0, 1].imshow(tensor_to_image(selected_I_high[i]))
+        axes[0, 1].set_title(r"$I_{\mathrm{high}}$")
+        axes[0, 1].axis("off")
+
+        axes[0, 2].imshow(tensor_to_image(mapped_f_low[i]))
+        axes[0, 2].set_title(r"$F_{\mathrm{low}}$")
+        axes[0, 2].axis("off")
+
+        axes[0, 3].imshow(tensor_to_image(mapped_f_high[i]))
+        axes[0, 3].set_title(r"$F_{\mathrm{high}}$")
+        axes[0, 3].axis("off")
+
+        # Row 2: R_low, R_high, L_low, L_high.
+        axes[1, 0].imshow(tensor_to_image(mapped_R_low[i]))
+        axes[1, 0].set_title(r"$R_{\mathrm{low}}$")
+        axes[1, 0].axis("off")
+
+        axes[1, 1].imshow(tensor_to_image(mapped_R_high[i]))
+        axes[1, 1].set_title(r"$R_{\mathrm{high}}$")
+        axes[1, 1].axis("off")
+
+        axes[1, 2].imshow(tensor_to_image(mapped_L_low[i]))
+        axes[1, 2].set_title(r"$L_{\mathrm{low}}$")
+        axes[1, 2].axis("off")
+
+        axes[1, 3].imshow(tensor_to_image(mapped_L_high[i]))
+        axes[1, 3].set_title(r"$L_{\mathrm{high}}$")
+        axes[1, 3].axis("off")
+
+        # Row 3: x0, x_t, x̂_t, x0(F_low^hat).
+        axes[2, 0].imshow(tensor_to_image(mapped_x0[i]))
+        axes[2, 0].set_title(r"$x_{0}$")
+        axes[2, 0].axis("off")
+
+        axes[2, 1].imshow(tensor_to_image(mapped_x_t[i]))
+        axes[2, 1].set_title(r"$x_{t}$")
+        axes[2, 1].axis("off")
+
+        axes[2, 2].imshow(tensor_to_image(mapped_x_hat_t[i]))
+        axes[2, 2].set_title(r"$\hat{x}_{t}$")
+        axes[2, 2].axis("off")
+
+        axes[2, 3].imshow(tensor_to_image(mapped_ref_f[i]))
+        axes[2, 3].set_title(r"$x_{0}(F_{\mathrm{low}}^{\hat{}})$")
+        axes[2, 3].axis("off")
+
+        # Row 4: Final enhanced image.
+        axes[3, 0].imshow(tensor_to_image(selected_I_hat[i]))
+        axes[3, 0].set_title(r"$I_{\mathrm{low}}^{\hat{}}$")
+        axes[3, 0].axis("off")
+        for c in range(1, num_cols):
+            axes[3, c].axis("off")
+
+        plt.tight_layout()
+        plt.show()
+
+def visualize_stage2_results(
+    pipeline: torch.nn.Module,
+    data_loader: DataLoader,
+    num_samples: int = 1,
+    random_seed: int = 42
+) -> None:
+    """
+    Top-level visualization function for Stage2 results using aggregated outputs.
+    
+    Args:
+        pipeline (torch.nn.Module): The full LightenDiffusionPipeline model.
+        data_loader (DataLoader): Dataloader yielding (x, y) batches (x: [B, m, 3, H, W]; y: [B, 3, H, W]).
+        num_samples (int): Number of samples to display.
+        random_seed (int): Seed for random selection.
+    """
+    visualize_stage2_results_aggregate(pipeline, data_loader, num_samples, random_seed)
