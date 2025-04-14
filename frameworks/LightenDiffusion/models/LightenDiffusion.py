@@ -7,7 +7,6 @@ from .unet import DiffusionUNet
 from ..utils.sampling import data_transform, inverse_data_transform
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from .utils import VisualizationMapper
 
 class Stage1(nn.Module):
     """
@@ -52,22 +51,14 @@ class Stage1(nn.Module):
         skip_features = features[:-1] # from low to high resolution
         R, L = self.decomposer(f)
         recon = self.decoder(R, *skip_features)
-        R_rgb = self.to_rgb(R)
-        L_rgb = self.to_rgb(L)
-        # Normalize R and L to [0, 1]
-        R_rgb = (R_rgb - R_rgb.min(dim=-1, keepdim=True)[0].min(dim=-2, keepdim=True)[0]) \
-          / (R_rgb.max(dim=-1, keepdim=True)[0].max(dim=-2, keepdim=True)[0] + 1e-6)
-        L_rgb = (L_rgb - L_rgb.min(dim=-1, keepdim=True)[0].min(dim=-2, keepdim=True)[0]) \
-                / (L_rgb.max(dim=-1, keepdim=True)[0].max(dim=-2, keepdim=True)[0] + 1e-6)
+        
         
         return {
             "f": f,
             "R": R,
             "L": L,
             "recon": recon,
-            "features": skip_features,
-            "R_rgb": R_rgb,
-            "L_rgb": L_rgb
+            "features": skip_features
         }
 
     def forward(self, imgs: torch.Tensor) -> List[Dict[str, torch.Tensor]]:
@@ -444,47 +435,3 @@ class LightenDiffusionPipeline(nn.Module):
             restored_latent = inverse_data_transform(restored_latent)
             enhanced_image = self.stage1.decoder(restored_latent, *aggregated_low.get("features"))
             return enhanced_image
-        
-    def map_to_rgb(self, tensor: torch.Tensor) -> torch.Tensor:
-        """
-        Maps an input tensor of shape [B, C, H, W] to an RGB tensor [B, 3, H, W]
-        by projecting the C channels onto the top three principal components using PCA.
-        For each sample, the PCA projection is then min–max normalized to [0, 1].
-
-        Args:
-            tensor (torch.Tensor): Input tensor of shape [B, C, H, W].
-
-        Returns:
-            torch.Tensor: Output RGB tensor of shape [B, 3, H, W].
-        """
-        B, C, H, W = tensor.shape
-        output = torch.zeros((B, 3, H, W), device=tensor.device)
-        
-        for b in range(B):
-            # Reshape sample to shape (C, H*W)
-            sample = tensor[b]  # shape: [C, H, W]
-            X = sample.reshape(C, -1)  # shape: [C, N] where N = H*W
-            
-            # Center the data
-            mean = X.mean(dim=1, keepdim=True)
-            X_centered = X - mean
-
-            # Perform singular value decomposition
-            # U: (C, C), S: (min(C, N)), Vh: (min(C, N), N)
-            U, S, Vh = torch.linalg.svd(X_centered, full_matrices=False)
-            
-            # Take the top 3 principal components from U
-            W_pca = U[:, :3]  # shape: [C, 3]
-            
-            # Project the centered data onto the top 3 components
-            X_proj = torch.matmul(W_pca.T, X_centered)  # shape: [3, N]
-            X_proj = X_proj.reshape(3, H, W)
-            
-            # Normalize the projected output to [0, 1]
-            X_min = X_proj.min()
-            X_max = X_proj.max()
-            X_norm = (X_proj - X_min) / (X_max - X_min + 1e-6)
-            
-            output[b] = X_norm
-
-        return output
