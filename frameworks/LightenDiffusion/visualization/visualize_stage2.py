@@ -59,7 +59,7 @@ def visualize_stage2_results_aggregate(
         num_samples (int): Number of samples from the batch to visualize.
         random_seed (int): Seed for random selection of samples.
     """
-    # Get a single batch.
+    torch.manual_seed(random_seed)
     batch_iter = iter(data_loader)
     x, y = next(batch_iter)
     device = next(pipeline.parameters()).device
