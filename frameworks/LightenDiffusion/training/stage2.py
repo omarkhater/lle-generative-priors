@@ -196,6 +196,7 @@ class Stage2Trainer(BaseTrainer):
         self.model.train()
         running_loss = 0.0
         running_scc_loss = 0.0
+        running_diffusion_loss = 0.0
         batch_bar = TqdmManager(
             total=len(self.train_loader), 
             desc="Training Batches", 
@@ -213,10 +214,11 @@ class Stage2Trainer(BaseTrainer):
 
             running_loss += total_loss.item()
             running_scc_loss += scc_loss.item()
+            running_diffusion_loss += diffusion_loss.item()
 
             avg_total_loss = running_loss / (i + 1)
             avg_scc_loss = running_scc_loss / (i + 1)
-            avg_diffusion_loss = diffusion_loss.item() / (i + 1)
+            avg_diffusion_loss = running_diffusion_loss / (i + 1)
             avg_weighted_scc_loss = self.lambda_scc * avg_scc_loss
 
             batch_bar.set_postfix(

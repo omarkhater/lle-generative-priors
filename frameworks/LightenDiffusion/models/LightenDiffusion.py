@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from typing import Optional, Dict, List, Any
-from tqdm import tqdm
+from frameworks.LightenDiffusion.training.tqdm_configuration import TqdmManager
 from .unet import DiffusionUNet
 from ..utils.sampling import data_transform, inverse_data_transform
 from .stage1 import Stage1
@@ -133,8 +133,14 @@ class Stage2(nn.Module):
         seq_next = [-1] + seq[:-1]
         alphas = 1.0 - self.betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
-        
-        for i, j in tqdm(zip(reversed(seq), reversed(seq_next)), total=len(seq), desc="Reverse Sampling", leave=True):
+
+        sampling_bar = TqdmManager(
+        total=len(seq), 
+        desc="Reverse Sampling", 
+        leave=False,
+        unit="step"
+    )
+        for i, j in zip(reversed(seq), reversed(seq_next)):
             t = torch.full((B,), i, dtype=torch.long, device=device)
             next_t = torch.full((B,), j, dtype=torch.long, device=device)
             at = alphas_cumprod[t].view(B, 1, 1, 1)
@@ -148,6 +154,8 @@ class Stage2(nn.Module):
                 x = at_next.sqrt() * x0_t + c1 * torch.randn_like(x) + c2 * et
             else:
                 x = x0_t
+            sampling_bar.update(1)
+        sampling_bar.close()
         return x
 
 
