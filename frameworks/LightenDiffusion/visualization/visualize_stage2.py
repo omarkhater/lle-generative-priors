@@ -120,7 +120,6 @@ def visualize_stage2_results_aggregate(
     mapped_L_high  = map_to_rgb(L_high)
     mapped_x0      = map_to_rgb(x0)
     mapped_x_t     = map_to_rgb(x_t)
-    mapped_x_hat_t = map_to_rgb(x_hat_t)
     mapped_ref_f   = map_to_rgb(ref_f)
 
     def to_cpu(t: torch.Tensor) -> torch.Tensor:
@@ -136,18 +135,17 @@ def visualize_stage2_results_aggregate(
     mapped_L_high   = to_cpu(mapped_L_high)
     mapped_x0       = to_cpu(mapped_x0)
     mapped_x_t      = to_cpu(mapped_x_t)
-    mapped_x_hat_t  = to_cpu(mapped_x_hat_t)
     mapped_ref_f    = to_cpu(mapped_ref_f)
     selected_I_hat  = to_cpu(I_hat_low)
 
     # Create a grid of subplots.
-    num_cols = 4
-    imgs_per_row = 4
+    num_cols = 6
+    num_rows = 2
     for i in range(len(sel_indices)):
-        fig, axes = plt.subplots(imgs_per_row, num_cols, figsize=(3*num_cols, 3*imgs_per_row))
+        fig, axes = plt.subplots(num_rows, num_cols, figsize=(3*num_cols, 3*num_rows))
         fig.suptitle(f"Sample {sel_indices[i]}", fontsize=16)
 
-        # Row 1: I_low, I_high, F_low, F_high.
+        # Row 1: I_low, I_high, F_low, F_high, R_low, R_high
         axes[0, 0].imshow(tensor_to_image(selected_I_low[i]))
         axes[0, 0].set_title(r"$I_{\mathrm{low}}$")
         axes[0, 0].axis("off")
@@ -164,47 +162,42 @@ def visualize_stage2_results_aggregate(
         axes[0, 3].set_title(r"$F_{\mathrm{high}}$")
         axes[0, 3].axis("off")
 
-        # Row 2: R_low, R_high, L_low, L_high.
-        axes[1, 0].imshow(tensor_to_image(mapped_R_low[i]))
-        axes[1, 0].set_title(r"$R_{\mathrm{low}}$")
+
+        axes[0, 4].imshow(tensor_to_image(mapped_R_low[i]))
+        axes[0, 4].set_title(r"$R_{\mathrm{low}}$")
+        axes[0, 4].axis("off")
+
+        axes[0, 5].imshow(tensor_to_image(mapped_R_high[i]))
+        axes[0, 5].set_title(r"$R_{\mathrm{high}}$")
+        axes[0, 5].axis("off")
+
+        # Row 2: L_low, L_high, x0, x_t, x0(F_low^hat), I^hat
+
+        axes[1, 0].imshow(tensor_to_image(mapped_L_low[i]))
+        axes[1, 0].set_title(r"$L_{\mathrm{low}}$")
         axes[1, 0].axis("off")
 
-        axes[1, 1].imshow(tensor_to_image(mapped_R_high[i]))
-        axes[1, 1].set_title(r"$R_{\mathrm{high}}$")
+        axes[1, 1].imshow(tensor_to_image(mapped_L_high[i]))
+        axes[1, 1].set_title(r"$L_{\mathrm{high}}$")
         axes[1, 1].axis("off")
 
-        axes[1, 2].imshow(tensor_to_image(mapped_L_low[i]))
-        axes[1, 2].set_title(r"$L_{\mathrm{low}}$")
+        axes[1, 2].imshow(tensor_to_image(mapped_x0[i]))
+        axes[1, 2].set_title(r"$x_{0}$")
         axes[1, 2].axis("off")
 
-        axes[1, 3].imshow(tensor_to_image(mapped_L_high[i]))
-        axes[1, 3].set_title(r"$L_{\mathrm{high}}$")
+        axes[1, 3].imshow(tensor_to_image(mapped_x_t[i]))
+        axes[1, 3].set_title(r"$x_{t}$")
         axes[1, 3].axis("off")
 
-        # Row 3: x0, x_t, x̂_t, x0(F_low^hat).
-        axes[2, 0].imshow(tensor_to_image(mapped_x0[i]))
-        axes[2, 0].set_title(r"$x_{0}$")
-        axes[2, 0].axis("off")
 
-        axes[2, 1].imshow(tensor_to_image(mapped_x_t[i]))
-        axes[2, 1].set_title(r"$x_{t}$")
-        axes[2, 1].axis("off")
+        axes[1, 4].imshow(tensor_to_image(mapped_ref_f[i]))
+        axes[1, 4].set_title(r"$x_{0}(F_{\mathrm{low}}^{\hat{}})$")
+        axes[1, 4].axis("off")
 
-        axes[2, 2].imshow(tensor_to_image(mapped_x_hat_t[i]))
-        axes[2, 2].set_title(r"$\hat{x}_{t}$")
-        axes[2, 2].axis("off")
-
-        axes[2, 3].imshow(tensor_to_image(mapped_ref_f[i]))
-        axes[2, 3].set_title(r"$x_{0}(F_{\mathrm{low}}^{\hat{}})$")
-        axes[2, 3].axis("off")
-
-        # Row 4: Final enhanced image.
-        axes[3, 0].imshow(tensor_to_image(selected_I_hat[i]))
-        axes[3, 0].set_title(r"$I_{\mathrm{low}}^{\hat{}}$")
-        axes[3, 0].axis("off")
-        for c in range(1, num_cols):
-            axes[3, c].axis("off")
-
+        axes[1, 5].imshow(tensor_to_image(selected_I_hat[i]))
+        axes[1, 5].set_title(r"$I_{\mathrm{low}}^{\hat{}}$")
+        axes[1, 5].axis("off")
+        
         plt.tight_layout()
         plt.show()
 
