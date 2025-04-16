@@ -186,7 +186,7 @@ class BaseTrainer(ABC):
                 epoch_bar.set_postfix(epoch=f"{epoch+1}", train_loss=f"{train_loss:.4f}")
                 if mlflow.active_run():
                     mlflow.log_metric("epoch_train_loss", train_loss, step=epoch)
-                if epoch > 1 and epoch % self.val_frequency == 0:
+                if epoch > 0 and epoch % self.val_frequency == 0:
                     val_loss = self.validate()
                     self.val_losses.append(val_loss)
                     logging.info(f"Epoch {epoch+1}/{self.num_epochs}: train={train_loss:.4f}, val={val_loss:.4f}")                    

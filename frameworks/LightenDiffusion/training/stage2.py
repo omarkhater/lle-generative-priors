@@ -6,8 +6,8 @@ from torch.utils.data import DataLoader
 from .losses import noise_loss, self_constrained_consistency_loss
 from frameworks.LightenDiffusion.visualization.visualize_stage2 import visualize_stage2_results
 import logging
-
-
+from evaluation.lighten_diffusion_stage2 import evaluate_stage2_metrics_avgfirst
+from IPython.display import display
 class Stage2Trainer(BaseTrainer):
     """
     Trainer for Stage2 (Diffusion model) that implements the loss as described in the paper.
@@ -49,7 +49,11 @@ class Stage2Trainer(BaseTrainer):
                  betas: torch.Tensor = None,
                  num_diffusion_timesteps: int = 1000,
                  num_sampling_timesteps: int = 50,
-                 gamma: float = 0.2):
+                 gamma: float = 0.2,
+                 num_visualization: int = 1,
+                 random_seed: int = 42,
+
+                 ) -> None:
         super().__init__(model, train_loader, val_loader, optimizer, device,
                          scheduler, num_epochs, val_frequency, patience)
         self.lambda_scc = lambda_scc
@@ -57,6 +61,8 @@ class Stage2Trainer(BaseTrainer):
         self.num_diffusion_timesteps = num_diffusion_timesteps
         self.num_sampling_timesteps = num_sampling_timesteps
         self.gamma = gamma
+        self.num_visualization = num_visualization
+        self.random_seed = random_seed
         self._validate_dimensions(train_loader, "train_loader")
         self._validate_dimensions(val_loader, "val_loader")
         self._validate_model_format()
@@ -189,6 +195,7 @@ class Stage2Trainer(BaseTrainer):
         """
         self.model.train()
         running_loss = 0.0
+        running_scc_loss = 0.0
         batch_bar = TqdmManager(
             total=len(self.train_loader), 
             desc="Training Batches", 
@@ -203,18 +210,23 @@ class Stage2Trainer(BaseTrainer):
             self.optimizer.zero_grad()
             total_loss.backward()
             self.optimizer.step()
-            running_loss += total_loss.item()
 
-            weighted_scc_loss = self.lambda_scc * scc_loss.item()
-            avg_running_loss = running_loss / (i + 1)
+            running_loss += total_loss.item()
+            running_scc_loss += scc_loss.item()
+
+            avg_total_loss = running_loss / (i + 1)
+            avg_scc_loss = running_scc_loss / (i + 1)
+            avg_diffusion_loss = diffusion_loss.item() / (i + 1)
+            avg_weighted_scc_loss = self.lambda_scc * avg_scc_loss
+
             batch_bar.set_postfix(
-                total_loss=f"{avg_running_loss:.4f}",
-                diffusion_loss=f"{diffusion_loss.item():.4f}",
-                weighted_scc_loss=f"{weighted_scc_loss:.4f}"
+                total_loss=f"{avg_total_loss:.4f}",
+                diffusion_loss=f"{avg_diffusion_loss:.4f}",
+                weighted_scc_loss=f"{avg_weighted_scc_loss:.4f}"
             )
             batch_bar.update(1)
         batch_bar.close()
-        return running_loss / len(self.train_loader)
+        return avg_total_loss
 
     def validate_batch(self, batch: Tuple[torch.Tensor, torch.Tensor]) -> float:
         """
@@ -238,7 +250,14 @@ class Stage2Trainer(BaseTrainer):
         This implementation visualizes Stage2 results.
         """
         print("Visualizing Stage2 results")
-        visualize_stage2_results(self.model, self.val_loader, num_samples=1)
+        val_metrics = evaluate_stage2_metrics_avgfirst(self.model, self.val_loader)
+        display(val_metrics)
+        visualize_stage2_results(
+            self.model, 
+            self.val_loader, 
+            num_samples=self.num_visualization, 
+            random_seed=self.random_seed
+        )
     
 
     def _gather_tensors(

@@ -6,8 +6,10 @@ from typing import List, Optional
 from torch.utils.data import DataLoader
 from .losses import ctdn_loss, content_loss
 from frameworks.LightenDiffusion.visualization.visualize_stage1 import visualize_stage1_results
+from evaluation.lighten_diffusion_stage1 import evaluate_stage1_metrics_individual
 import logging
 from .tqdm_configuration import TqdmManager
+from IPython.display import display
 
 class Stage1Trainer(BaseTrainer):
     """
@@ -32,7 +34,9 @@ class Stage1Trainer(BaseTrainer):
         weight_rec: float = 1.0,
         weight_ref: float = 0.1,
         weight_ill: float = 0.1,
-        lambda_g: float = 0.2
+        lambda_g: float = 0.2,
+        num_visualizations: int = 1,
+        random_seed: int = 42
     ):
         """
         Args:
@@ -50,6 +54,8 @@ class Stage1Trainer(BaseTrainer):
             weight_ref (float): Weight for reflectance-consistency term in ctdn_loss.
             weight_ill (float): Weight for illumination-smoothness term in ctdn_loss.
             lambda_g (float): Exponential weighting factor for gradient in ctdn_loss.
+            num_visualizations (int): Number of samples to visualize during validation.
+            random_seed (int): Seed for random selection of samples.
         """
         super().__init__(
             model, 
@@ -72,6 +78,8 @@ class Stage1Trainer(BaseTrainer):
         self.best_state = copy.deepcopy(self.model.state_dict())
         self.train_losses: List[float] = []
         self.val_losses: List[float] = []
+        self.num_visualizations = num_visualizations
+        self.random_seed = random_seed
         self._validate_dimensions(train_loader, "train_loader")
         self._validate_dimensions(val_loader, "val_loader")
         self._validate_model_format()
@@ -162,6 +170,8 @@ class Stage1Trainer(BaseTrainer):
         """
         self.model.train()
         running_loss = 0.0
+        running_ctdn_loss = 0.0
+        running_con_loss = 0.0
         batch_bar = TqdmManager(
             total=len(self.train_loader), 
             desc="Training Batches", 
@@ -171,31 +181,34 @@ class Stage1Trainer(BaseTrainer):
         for i, (low_imgs, _) in enumerate(self.train_loader):
             low_imgs = low_imgs.to(self.device)  
             outputs_list = self.model(low_imgs)
-            reflectances, illuminations, reconstructions, encoded_features = self._gather_tensors(
+            loss_tesnors = self._gather_tensors(
                 low_imgs, 
                 outputs_list
             )
-            loss_total, loss_ctdn, loss_con = self.calculate_loss(
-                low_imgs,
-                reflectances,
-                illuminations,
-                reconstructions,
-                encoded_features
-            )
+            loss_total, loss_ctdn, loss_con = self.calculate_loss(*loss_tesnors)
             self.optimizer.zero_grad()
             loss_total.backward()
             self.optimizer.step()
 
             running_loss += loss_total.item()
+            running_ctdn_loss += loss_ctdn.item()
+            running_con_loss += loss_con.item()
+
+            avg_total_loss = running_loss / (i + 1)
+            avg_ctdn_loss = running_ctdn_loss / (i + 1)
+            avg_con_loss = running_con_loss / (i + 1)
+            weighted_loss_content = self.weight_cont * avg_con_loss
+
             batch_bar.set_postfix(
-                    total_loss=f"{running_loss:.4f}",
-                    weighted_content_loss=f"{loss_con:.4f}", 
-                    ctdn_loss=f"{loss_ctdn:.4f}"
+                    total_loss=f"{avg_total_loss:.4f}",
+                    weighted_content_loss=f"{weighted_loss_content:.4f}", 
+                    ctdn_loss=f"{avg_ctdn_loss:.4f}"
                 )  
             batch_bar.update(1)
     
         batch_bar.close()
-        return running_loss / len(self.train_loader)
+
+        return avg_total_loss
 
     def validate_batch(self, batch: tuple) -> float:
         """
@@ -236,14 +249,18 @@ class Stage1Trainer(BaseTrainer):
             encoded_features
         )
         
+
         return loss_total
 
     
     def after_validation(self):
+        val_metrics = evaluate_stage1_metrics_individual(self.model, self.val_loader)
+        display(val_metrics)
         visualize_stage1_results(
             self.model, 
             self.val_loader, 
-            num_samples=2
+            num_samples=self.num_visualizations,
+            seed=self.random_seed,
         )
         return
     
