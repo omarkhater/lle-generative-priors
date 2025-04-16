@@ -181,10 +181,7 @@ class Stage1Trainer(BaseTrainer):
         for i, (low_imgs, _) in enumerate(self.train_loader):
             low_imgs = low_imgs.to(self.device)  
             outputs_list = self.model(low_imgs)
-            loss_tesnors = self._gather_tensors(
-                low_imgs, 
-                outputs_list
-            )
+            loss_tesnors = self._gather_tensors(low_imgs, outputs_list)
             loss_total, loss_ctdn, loss_con = self.calculate_loss(*loss_tesnors)
             self.optimizer.zero_grad()
             loss_total.backward()
@@ -222,34 +219,10 @@ class Stage1Trainer(BaseTrainer):
             float: The computed loss for this batch.
         """
         low_imgs, _ = batch
-        low_imgs = low_imgs.to(self.device)  # shape [B, m, 3, H, W]
+        low_imgs = low_imgs.to(self.device)
         outputs_list = self.model(low_imgs)
-        reflectances = []
-        illuminations = []
-        decoder_recons = []
-        encoded_features = []
-        
-        for j in range(low_imgs.shape[1]):
-            reflectances.append(outputs_list[j]["R"])
-            illuminations.append(outputs_list[j]["L"])
-            decoder_recons.append(outputs_list[j]["recon"])
-            encoded_features.append(outputs_list[j]["f"])
-        
-        reflectances = torch.stack(reflectances, dim=1)
-        illuminations = torch.stack(illuminations, dim=1)
-        reconstructions = torch.stack(decoder_recons, dim=1)
-        encoded_features = torch.stack(encoded_features, dim=1)
-        
-
-        loss_total, _, _ = self.calculate_loss(
-            low_imgs,
-            reflectances,
-            illuminations,
-            reconstructions,
-            encoded_features
-        )
-        
-
+        loss_tensors = self._gather_tensors(low_imgs, outputs_list)
+        loss_total, _, _ = self.calculate_loss(*loss_tensors)
         return loss_total
 
     
@@ -290,7 +263,13 @@ class Stage1Trainer(BaseTrainer):
         reconstructions = torch.stack(decoder_recons, dim=1)
         encoded_features = torch.stack(encoded_features, dim=1)
 
-        return reflectances, illuminations, reconstructions, encoded_features
+        return (
+            low_imgs,
+            reflectances, 
+            illuminations,
+            reconstructions, 
+            encoded_features
+        )
     
     def _validate_model_format(self) -> None:
         """
