@@ -251,9 +251,10 @@ class Stage2Trainer(BaseTrainer):
         Hook method to execute after the validation loop.
         This implementation visualizes Stage2 results.
         """
-        print("Visualizing Stage2 results")
+        
         val_metrics = evaluate_stage2_metrics_avgfirst(self.model, self.val_loader)
         display(val_metrics)
+        print("Visualizing Stage2 results")
         visualize_stage2_results(
             self.model, 
             self.val_loader, 

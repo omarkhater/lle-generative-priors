@@ -195,6 +195,7 @@ class BaseTrainer(ABC):
                     if stop:
                         break
                     if self.scheduler is not None:
+                        logging.info(f"Step scheduler at epoch {epoch+1} with val_loss={val_loss:.4f}")
                         self.scheduler.step(val_loss)
                 epoch_bar.update(1)
             
@@ -293,3 +294,11 @@ class BaseTrainer(ABC):
             return {k: self.ensure_on_device(v) for k, v in data.items()}
         else:
             return data
+        
+    def after_training(self):
+        """
+        Hook method called after training is complete.
+        Child classes can override this to add visualizations
+        or other post-training processing.
+        """
+        pass
