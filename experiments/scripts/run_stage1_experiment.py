@@ -112,11 +112,27 @@ def run_experiment(config_path):
         best_model, metrics = trainer.train()
         mlflow.log_metric('best_loss', metrics['best_loss'])
         mlflow.log_metric('best_epoch', metrics['best_epoch'])
-        for i, loss in enumerate(metrics['train_losses']):
-            mlflow.log_metric('train_loss', loss, step=i)
         
+        # Log training losses under "losses/train"
+        for i, loss in enumerate(metrics['train_losses']):
+            mlflow.log_metric("losses/train", loss, step=i)
+        
+        # Log validation losses under "losses/val"
         for i, val_idx in enumerate([j * config.get('val_frequency') for j in range(len(metrics['val_losses']))]):
-            mlflow.log_metric('val_loss', metrics['val_losses'][i], step=val_idx)
+            mlflow.log_metric("losses/val", metrics['val_losses'][i], step=val_idx)
+        
+        # Log the validation metrics history computed in after_validation (if available)
+        higher_metrics = {"psnr", "ssim"}
+        lower_metrics = {"tv_illumination", "pi", "niqe", "lpips"}
+        if hasattr(trainer, "all_val_metrics"):
+            for idx, val_metrics in enumerate(trainer.all_val_metrics):
+                for metric_name, value in val_metrics.items():
+                    if metric_name in higher_metrics:
+                        mlflow.log_metric(f"higher_is_better/val/{metric_name}", value, step=idx)
+                    elif metric_name in lower_metrics:
+                        mlflow.log_metric(f"lower_is_better/val/{metric_name}", value, step=idx)
+                    else:
+                        mlflow.log_metric(f"val/{metric_name}", value, step=idx)
         
         test_metrics = evaluate_stage1_metrics_individual(
             best_model, 
@@ -125,7 +141,13 @@ def run_experiment(config_path):
         )
         
         for metric_name, value in test_metrics.items():
-            mlflow.log_metric(f"test_{metric_name}", value)
+            if metric_name in higher_metrics:
+                mlflow.log_metric(f"higher_is_better/test/{metric_name}", value)
+            elif metric_name in lower_metrics:
+                mlflow.log_metric(f"lower_is_better/test/{metric_name}", value)
+            else:
+                # For any metric that does not fall in the above groups, you may log it directly
+                mlflow.log_metric(f"test/{metric_name}", value)
         
         if config.get('save_model', True):
             model_dir = config.get('model_save_dir', 'trained_models/stage1')
