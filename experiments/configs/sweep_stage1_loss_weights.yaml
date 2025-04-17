@@ -1,4 +1,5 @@
 base:
+  experiment_name: "stage1_loss_weights_sweep"
   num_epochs: 15
   device: cuda
   dataset_name: "SICE_paired"
@@ -8,17 +9,17 @@ base:
   learning_rate: 1e-5
   weight_decay: 1e-4
   patience: 3
-  val_frequency: 1
+  val_frequency: 3
   use_scheduler: true
   scheduler_gamma: 0.8
 
 
 sweep:
-  weight_cont: [0, 0.05, 0.1, 0.2, .5, 1]
-  weight_rec: [0, 0.05, 0.1, 0.2, .5, 1]
-  weight_ref: [0, 0.05, 0.1, 0.2, .5, 1]
-  weight_ill: [0, 0.05, 0.1, 0.2, .5, 1]
-  lambda_g: [0, 0.05, 0.1, 0.2, .5, 1]
+  weight_cont: [0.05, 0.1, 0.2, .5, 1]
+  weight_rec: [0.05, 0.1, 0.2, .5, 1, 5, 10]
+  weight_ref: [0.05, 0.1, 0.2, .5, 1, 5, 10]
+  weight_ill: [0.05, 0.1, 0.2, .5, 1, 5, 10]
+  lambda_g: [0.05, 0.1, 0.2, .5, 1, 5, 10]
   train_dataset: ['SICE']
   test_dataset: ['SICE']
 

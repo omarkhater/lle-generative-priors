@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from .visualization_utils import map_to_rgb, tensor_to_image, get_visualization_batch
 from typing import Optional, Tuple, List, Dict, Any
+import os
 
 def extract_low_quality_images(sample_batch: torch.Tensor) -> torch.Tensor:
     """
@@ -64,7 +65,7 @@ def plot_stage1_figures(low_quality: torch.Tensor, encoded_feats: torch.Tensor,
                         R: torch.Tensor, L: torch.Tensor, RL_product: torch.Tensor,
                         reconstruction: torch.Tensor,
                         gt_batch: Optional[torch.Tensor],
-                        num_samples: int, m: int, is_paired: bool) -> None:
+                        num_samples: int, m: int, is_paired: bool) -> List[plt.Figure]:
     """
     Plots the Stage1 outputs.
     
@@ -81,7 +82,7 @@ def plot_stage1_figures(low_quality: torch.Tensor, encoded_feats: torch.Tensor,
     
     Otherwise, for m != 2, it creates a single grid figure with one row per sample.
     """
-    # For a single row, the number of columns is:
+    figs = []
     cols_single = 1 + 1 + 1 + 1 + 1 + 1 + (1 if is_paired else 0)  # = 6 or 7
     
     if m == 2:
@@ -132,7 +133,7 @@ def plot_stage1_figures(low_quality: torch.Tensor, encoded_feats: torch.Tensor,
                     axes[row, col].set_title("Ground Truth")
                     axes[row, col].axis("off")
             plt.tight_layout()
-            plt.show()
+            figs.append(fig)
     else:
         # For m != 2, show one row per sample in a single grid.
         num_rows = min(num_samples, low_quality.shape[0])
@@ -175,14 +176,17 @@ def plot_stage1_figures(low_quality: torch.Tensor, encoded_feats: torch.Tensor,
                 axes[i, col].set_title("Ground Truth")
                 axes[i, col].axis("off")
         plt.tight_layout()
-        plt.show()
+        figs.append(fig)
+    return figs
 
 def visualize_stage1_results(
         stage1: torch.nn.Module,
         data_loader: DataLoader,
         num_samples: int = 8,
         is_paired: bool = True,
-        seed: int = 42
+        seed: int = 42,
+        save_dir: Optional[str] = None,
+        show_plot: bool = True
     ) -> None:
     """
     Top-level function to visualize Stage1 outputs.
@@ -211,5 +215,15 @@ def visualize_stage1_results(
     reconstruction = extract_reconstruction(outputs, m)
     RL_product = compute_rl_product(R, L)
 
-    plot_stage1_figures(low_quality, encoded_feats, R, L, RL_product,
-                        reconstruction, gt_batch, num_samples, m, is_paired)
+    figs = plot_stage1_figures(low_quality, encoded_feats, R, L, RL_product,
+                               reconstruction, gt_batch, num_samples, m, is_paired)
+    
+    if save_dir:
+        for idx, fig in enumerate(figs):
+            fig_path = os.path.join(save_dir, f"sample_{idx}.png")
+            fig.savefig(fig_path)
+            plt.close(fig)
+    else:
+        if show_plot:
+            for fig in figs:
+                fig.show()
