@@ -1,0 +1,40 @@
+base:
+  num_epochs: 15
+  device: cuda
+  dataset_name: "SICE_paired"
+  dataset_id: "okhater/SICE"
+  batch_size: 16
+  val_split_ratio: 0.2
+  learning_rate: 1e-5
+  weight_decay: 1e-4
+  patience: 3
+  val_frequency: 1
+  use_scheduler: true
+  scheduler_gamma: 0.8
+
+
+sweep:
+  weight_cont: [0, 0.05, 0.1, 0.2, .5, 1]
+  weight_rec: [0, 0.05, 0.1, 0.2, .5, 1]
+  weight_ref: [0, 0.05, 0.1, 0.2, .5, 1]
+  weight_ill: [0, 0.05, 0.1, 0.2, .5, 1]
+  lambda_g: [0, 0.05, 0.1, 0.2, .5, 1]
+  train_dataset: ['SICE']
+  test_dataset: ['SICE']
+
+encoder:
+  base_channels: 64
+  channel_factors: [1, 2, 4]
+  in_channels: 3
+  encoded_channels: 64
+
+decoder:
+  base_channels: 64
+  channel_factors: [1, 2, 4]
+  out_channels: 3
+  encoded_channels: 64
+
+decomposer:
+  channels: 64
+  num_cross_attention_heads: 8
+  num_self_attention_heads: 8
