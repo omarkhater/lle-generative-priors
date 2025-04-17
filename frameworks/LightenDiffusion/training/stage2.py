@@ -202,7 +202,7 @@ class Stage2Trainer(BaseTrainer):
             desc="Training Batches", 
             leave=True,
             unit = "batch",
-            )
+        )
         for i, batch_data in enumerate(self.train_loader):
             batch_data = self.ensure_on_device(batch_data)
             low_imgs, high_imgs = batch_data
@@ -211,16 +211,13 @@ class Stage2Trainer(BaseTrainer):
             self.optimizer.zero_grad()
             total_loss.backward()
             self.optimizer.step()
-
             running_loss += total_loss.item()
             running_scc_loss += scc_loss.item()
             running_diffusion_loss += diffusion_loss.item()
-
             avg_total_loss = running_loss / (i + 1)
             avg_scc_loss = running_scc_loss / (i + 1)
             avg_diffusion_loss = running_diffusion_loss / (i + 1)
             avg_weighted_scc_loss = self.lambda_scc * avg_scc_loss
-
             batch_bar.set_postfix(
                 total_loss=f"{avg_total_loss:.4f}",
                 diffusion_loss=f"{avg_diffusion_loss:.4f}",
@@ -228,7 +225,11 @@ class Stage2Trainer(BaseTrainer):
             )
             batch_bar.update(1)
         batch_bar.close()
-        return avg_total_loss
+        return {
+            "total_loss": avg_total_loss,
+            "diffusion_loss": avg_diffusion_loss,
+            "scc_loss": avg_scc_loss
+        }
 
     def validate_batch(self, batch: Tuple[torch.Tensor, torch.Tensor]) -> float:
         """

@@ -173,21 +173,30 @@ class BaseTrainer(ABC):
             - metrics: A dictionary containing training and validation losses.
         """
         try:
+            prefix = "loss/"
             num_bad = 0
             epoch_bar = TqdmManager(
                 total=self.num_epochs, 
                 desc="Training Epochs", 
                 leave=True,
-                unit = "epoch",
+                unit="epoch",
             )
             for epoch in range(self.num_epochs):
-                train_loss = self.train_epoch()
+                loss_dict = self.train_epoch()
+
+                train_loss = loss_dict.get("total_loss")
+                if train_loss is None:
+                    raise ValueError("Training loss not found in loss_dict. Does train_epoch return a key = total_loss?")
+                
                 self.train_losses.append(train_loss)
                 epoch_bar.set_postfix(epoch=f"{epoch+1}", train_loss=f"{train_loss:.4f}")
                 if mlflow.active_run():
-                    mlflow.log_metric("epoch_train_loss", train_loss, step=epoch)
+                    mlflow.log_metric(f"{prefix}total", train_loss, step=epoch)
+                    for key, value in loss_dict.items():
+                        if key != "total_loss":
+                            mlflow.log_metric(f"{prefix}{key}", value, step=epoch)
                 if epoch > 0 and epoch % self.val_frequency == 0:
-                    val_loss = self.validate()
+                    val_loss = self.validate(epoch+1)
                     self.val_losses.append(val_loss)
                     logging.info(f"Epoch {epoch+1}/{self.num_epochs}: train={train_loss:.4f}, val={val_loss:.4f}")                    
                     epoch_bar.set_postfix(epoch=f"{epoch+1}", train_loss=f"{train_loss:.4f}", val_loss=f"{val_loss:.4f}")
@@ -240,11 +249,14 @@ class BaseTrainer(ABC):
                 return True, num_bad
         return False, num_bad
 
-    def validate(self) -> float:
+    def validate(self, current_epoch: int) -> float:
         """
         Validation loop that uses validate_batch to compute loss.
         Provides a standard validation workflow while allowing
         custom batch processing logic in child classes.
+
+        Args:
+            current_epoch (int): The current epoch number.
         """
         self.model.eval()
         running_loss = 0.0
@@ -255,16 +267,19 @@ class BaseTrainer(ABC):
                 loss = self.validate_batch(batch_data)
                 running_loss += loss if isinstance(loss, float) else loss.item()
         
-        self.after_validation()
+        self.after_validation(current_epoch)
         
         self.model.train()
         return running_loss / len(self.val_loader)
 
-    def after_validation(self):
+    def after_validation(self, current_epoch: int):
         """
         Hook method called after validation is complete.
         Child classes can override this to add visualizations
         or other post-validation processing.
+
+        Args:
+            current_epoch (int): The current epoch number.
         """
         pass
 

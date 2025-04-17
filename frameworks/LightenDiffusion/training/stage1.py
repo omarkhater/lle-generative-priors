@@ -10,6 +10,7 @@ from evaluation.lighten_diffusion_stage1 import evaluate_stage1_metrics_individu
 import logging
 from .tqdm_configuration import TqdmManager
 from IPython.display import display
+import os
 
 class Stage1Trainer(BaseTrainer):
     """
@@ -83,6 +84,7 @@ class Stage1Trainer(BaseTrainer):
         self.num_visualizations = num_visualizations
         self.random_seed = random_seed
         self.after_validate = after_validate
+        self.all_val_metrics = []
         self._validate_dimensions(train_loader, "train_loader")
         self._validate_dimensions(val_loader, "val_loader")
         self._validate_model_format()
@@ -159,7 +161,7 @@ class Stage1Trainer(BaseTrainer):
 
         return loss_total, loss_ctdn, loss_con
 
-    def train_epoch(self) -> float:
+    def train_epoch(self) -> dict:
         """
         Train for one epoch in unsupervised Stage1:
           1) Forward pass: model(low_imgs) => list of dictionaries [ {R, L}, {R, L}, ... ]
@@ -169,12 +171,13 @@ class Stage1Trainer(BaseTrainer):
         Args:
             None
         Returns:
-            float: Average loss for the epoch.
+            dict: Dictionary containing average total loss, weighted content loss, and ctdn loss.
         """
         self.model.train()
         running_loss = 0.0
         running_ctdn_loss = 0.0
         running_con_loss = 0.0
+
         batch_bar = TqdmManager(
             total=len(self.train_loader), 
             desc="Training Batches", 
@@ -199,6 +202,8 @@ class Stage1Trainer(BaseTrainer):
             avg_con_loss = running_con_loss / (i + 1)
             weighted_loss_content = self.weight_cont * avg_con_loss
 
+
+
             batch_bar.set_postfix(
                     total_loss=f"{avg_total_loss:.4f}",
                     weighted_content_loss=f"{weighted_loss_content:.4f}", 
@@ -208,7 +213,11 @@ class Stage1Trainer(BaseTrainer):
     
         batch_bar.close()
 
-        return avg_total_loss
+        return {
+            'total_loss': avg_total_loss,
+            'weighted_content_loss': weighted_loss_content,
+            'ctdn_loss': avg_ctdn_loss,
+        }
 
     def validate_batch(self, batch: tuple) -> float:
         """
@@ -229,16 +238,22 @@ class Stage1Trainer(BaseTrainer):
         return loss_total
 
     
-    def after_validation(self):
+    def after_validation(self, epoch: int):
         if self.after_validate:
             val_metrics = evaluate_stage1_metrics_individual(self.model, self.val_loader)
-            display(val_metrics)
+            self.all_val_metrics.append(val_metrics)
+            # Do not display interactively.
+            # Instead, generate validation plots and save them for artifact logging.
             if self.num_visualizations > 0:
+                save_dir = f"outputs/visualizations/val_stage1/epoch_{epoch}"
+                os.makedirs(save_dir, exist_ok=True)
                 visualize_stage1_results(
                     self.model, 
                     self.val_loader, 
                     num_samples=self.num_visualizations,
                     seed=self.random_seed,
+                    save_dir=save_dir,
+                    show_plot=False
                 )
         return
     
