@@ -1,0 +1,35 @@
+base:
+  experiment_name: "stage2_top_models_sweep"
+  num_epochs: 150
+  device: "cuda"
+  dataset_name: "SICE_paired"
+  dataset_id: "okhater/SICE"
+  batch_size: 8
+  val_split_ratio: 0.2
+  learning_rate: 1e-4
+  weight_decay: 1e-4
+  patience: 8
+  val_frequency: 5
+  use_scheduler: true
+  scheduler_gamma: 0.8
+  num_diffusion_timesteps: 1000
+  num_sampling_timesteps: 50
+  stage1_model_selection:
+    metric: "psnr"
+    top_k: 3
+    experiment_name: "stage1_loss_weights_sweep"
+  latent_space_dim: 64
+
+sweep:
+  lambda_scc: [0.001, 0.01, 0.1, 0.5]
+  gamma: [0.1, 0.2, 0.5]
+
+diffusion_unet:
+  in_channels: 128  # latent_space_dim*2
+  out_channels: 64  # latent_space_dim
+  ch: 64
+  ch_mult: [1, 2, 3, 4]
+  num_res_blocks: 2
+  dropout: 0.0
+  conditional: true
+  resamp_with_conv: true
