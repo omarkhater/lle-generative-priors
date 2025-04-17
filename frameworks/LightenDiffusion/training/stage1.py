@@ -36,7 +36,8 @@ class Stage1Trainer(BaseTrainer):
         weight_ill: float = 0.1,
         lambda_g: float = 0.2,
         num_visualizations: int = 1,
-        random_seed: int = 42
+        random_seed: int = 42,
+        after_validate: bool = True,
     ):
         """
         Args:
@@ -56,6 +57,7 @@ class Stage1Trainer(BaseTrainer):
             lambda_g (float): Exponential weighting factor for gradient in ctdn_loss.
             num_visualizations (int): Number of samples to visualize during validation.
             random_seed (int): Seed for random selection of samples.
+            after_validate (bool): Whether to run after-validation
         """
         super().__init__(
             model, 
@@ -80,6 +82,7 @@ class Stage1Trainer(BaseTrainer):
         self.val_losses: List[float] = []
         self.num_visualizations = num_visualizations
         self.random_seed = random_seed
+        self.after_validate = after_validate
         self._validate_dimensions(train_loader, "train_loader")
         self._validate_dimensions(val_loader, "val_loader")
         self._validate_model_format()
@@ -227,14 +230,16 @@ class Stage1Trainer(BaseTrainer):
 
     
     def after_validation(self):
-        val_metrics = evaluate_stage1_metrics_individual(self.model, self.val_loader)
-        display(val_metrics)
-        visualize_stage1_results(
-            self.model, 
-            self.val_loader, 
-            num_samples=self.num_visualizations,
-            seed=self.random_seed,
-        )
+        if self.after_validate:
+            val_metrics = evaluate_stage1_metrics_individual(self.model, self.val_loader)
+            display(val_metrics)
+            if self.num_visualizations > 0:
+                visualize_stage1_results(
+                    self.model, 
+                    self.val_loader, 
+                    num_samples=self.num_visualizations,
+                    seed=self.random_seed,
+                )
         return
     
     def _gather_tensors(self, low_imgs, outputs_list):
