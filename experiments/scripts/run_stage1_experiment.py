@@ -13,7 +13,7 @@ from evaluation.utils import aggregate_metrics
 from frameworks.LightenDiffusion.visualization.visualize_stage1 import visualize_stage1_results
 from eda.helpers.training_helpers import get_optimizer, get_scheduler
 from utils.mlflow_utils import setup_mlflow_tracking, create_experiment_group, log_dict_as_params
-from experiments.utils import ExperimentConfig, setup_dataloaders
+from experiments.utils.general_utils import ExperimentConfig, setup_dataloaders
 import os
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
