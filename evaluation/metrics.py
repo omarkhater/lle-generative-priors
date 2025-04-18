@@ -4,6 +4,10 @@ import lpips
 import torch
 import pyiqa
 import traceback
+import logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.getLogger('niqe_library').setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
 
 def to_numpy(image_tensor: torch.Tensor) -> np.ndarray:
     """
