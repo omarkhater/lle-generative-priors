@@ -75,6 +75,10 @@ def run_experiment(config_path, model_index=0):
     model = LightenDiffusionPipeline(stage1=stage1_model, stage2=stage2_model)
     model.to(device)
     
+    # Define metrics categorization
+    higher_metrics = {"psnr", "ssim"}
+    lower_metrics = {"lpips", "niqe", "pi"}
+    
     with mlflow.start_run(run_name=run_name):
         # Log parameters
         log_dict_as_params(config.to_dict())
@@ -122,10 +126,26 @@ def run_experiment(config_path, model_index=0):
         mlflow.log_metric("best_val_loss", metrics['best_loss'])
         mlflow.log_metric("best_epoch", metrics['best_epoch'])
         
+        # Log per-epoch validation metrics history (if available)
+        if hasattr(trainer, "all_val_metrics"):
+            for epoch_idx, val_metrics in enumerate(trainer.all_val_metrics):
+                for metric_name, value in val_metrics.items():
+                    if metric_name in higher_metrics:
+                        mlflow.log_metric(f"higher_is_better/val/{metric_name}", float(value), step=epoch_idx)
+                    elif metric_name in lower_metrics:
+                        mlflow.log_metric(f"lower_is_better/val/{metric_name}", float(value), step=epoch_idx)
+                    else:
+                        mlflow.log_metric(f"val/{metric_name}", float(value), step=epoch_idx)
+        
         # Evaluate on test set
         test_metrics = evaluate_stage2_metrics_avgfirst(best_model, dataloaders['test'])
         for name, value in test_metrics.items():
-            mlflow.log_metric(f"test_{name}", float(value))
+            if name in higher_metrics:
+                mlflow.log_metric(f"higher_is_better/test/{name}", float(value))
+            elif name in lower_metrics:
+                mlflow.log_metric(f"lower_is_better/test/{name}", float(value))
+            else:
+                mlflow.log_metric(f"test/{name}", float(value))
         
         # Visualize results
         vis_dir = os.path.join("outputs", "visualizations", run_name)
