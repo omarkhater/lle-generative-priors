@@ -5,9 +5,9 @@ from typing import Tuple, Optional
 from torch.utils.data import DataLoader
 from .losses import noise_loss, self_constrained_consistency_loss
 from frameworks.LightenDiffusion.visualization.visualize_stage2 import visualize_stage2_results
-import logging
+import logging, os
 from evaluation.lighten_diffusion_stage2 import evaluate_stage2_metrics_avgfirst
-from IPython.display import display
+
 class Stage2Trainer(BaseTrainer):
     """
     Trainer for Stage2 (Diffusion model) that implements the loss as described in the paper.
@@ -52,6 +52,8 @@ class Stage2Trainer(BaseTrainer):
                  gamma: float = 0.2,
                  num_visualization: int = 1,
                  random_seed: int = 42,
+                 after_validate: bool = True,
+                 save_visualization_dir: Optional[str] = None,
 
                  ) -> None:
         super().__init__(model, train_loader, val_loader, optimizer, device,
@@ -63,6 +65,9 @@ class Stage2Trainer(BaseTrainer):
         self.gamma = gamma
         self.num_visualization = num_visualization
         self.random_seed = random_seed
+        self.after_validate = after_validate
+        self.all_val_metrics = []
+        self.save_visualization_dir = save_visualization_dir
         self._validate_dimensions(train_loader, "train_loader")
         self._validate_dimensions(val_loader, "val_loader")
         self._validate_model_format()
@@ -228,7 +233,8 @@ class Stage2Trainer(BaseTrainer):
         return {
             "total_loss": avg_total_loss,
             "diffusion_loss": avg_diffusion_loss,
-            "scc_loss": avg_scc_loss
+            "scc_loss": avg_scc_loss,
+            "weighted_scc_loss": avg_weighted_scc_loss
         }
 
     def validate_batch(self, batch: Tuple[torch.Tensor, torch.Tensor]) -> float:
@@ -246,22 +252,26 @@ class Stage2Trainer(BaseTrainer):
         total_loss, _, _ = self.calculate_loss(*loss_tensors)
         return total_loss
 
-    def after_validation(self):
+    def after_validation(self, epoch: int) -> None:
 
         """
         Hook method to execute after the validation loop.
         This implementation visualizes Stage2 results.
         """
-        
-        val_metrics = evaluate_stage2_metrics_avgfirst(self.model, self.val_loader)
-        display(val_metrics)
-        print("Visualizing Stage2 results")
-        visualize_stage2_results(
-            self.model, 
-            self.val_loader, 
-            num_samples=self.num_visualization, 
-            random_seed=self.random_seed
-        )
+        if self.after_validate:
+            val_metrics = evaluate_stage2_metrics_avgfirst(self.model, self.val_loader)
+            self.all_val_metrics.append(val_metrics)
+
+            if self.num_visualization:
+                save_dir = os.path.join(self.save_visualization_dir, f"epoch_{epoch}")
+                os.makedirs(save_dir, exist_ok=True)
+                visualize_stage2_results(
+                    self.model, 
+                    self.val_loader, 
+                    num_samples=self.num_visualization, 
+                    random_seed=self.random_seed,
+                    save_dir=self.save_visualization_dir
+                )
     
 
     def _gather_tensors(

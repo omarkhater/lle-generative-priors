@@ -15,12 +15,9 @@ from frameworks.LightenDiffusion.models.unet import DiffusionUNet
 from frameworks.LightenDiffusion.models.decom import ImageEncoder, ImageDecoder, RetinexDecomposition
 from frameworks.LightenDiffusion.training.stage2 import Stage2Trainer
 from frameworks.LightenDiffusion.visualization.visualize_stage2 import visualize_stage2_results
-from frameworks.LightenDiffusion.losses import stage2_loss_wrapper
 from evaluation.lighten_diffusion_stage2 import evaluate_stage2_metrics_avgfirst
-
-from experiments.utils.model_selection import get_top_models_by_metric, download_model_from_run
 from experiments.scripts.select_top_stage1_models import select_top_models
-from experiments.utils import setup_dataloaders
+from experiments.utils.general_utils import setup_dataloaders
 from eda.helpers.training_helpers import get_optimizer, get_scheduler
 from utils.mlflow_utils import setup_mlflow_tracking, log_dict_as_params
 from experiments.utils.s3_utils import upload_file_to_s3, upload_directory_to_s3
@@ -60,49 +57,23 @@ def visualize_and_save_samples(model, dataloader, output_dir, num_samples=3):
         
     return output_dir
 
-def load_stage1_model(model_path: str, device: torch.device, latent_space_dim: int) -> Stage1:
-    """
-    Load a Stage1 model from a local path.
-    
-    Args:
-        model_path: Path to the model
-        device: Torch device
-        latent_space_dim: Dimension of the latent space
-    
-    Returns:
-        Stage1: Loaded Stage1 model
-    """
-    stage1_model = Stage1(
-        encoder=ImageEncoder(latent_space_dim),
-        decoder=ImageDecoder(latent_space_dim),
-        decomposer=RetinexDecomposition(channels=latent_space_dim),
-    )
-    
-    # Get the model file path - it's either a direct file or inside a directory
-    if os.path.isdir(model_path):
-        # Look for PyTorch model file
-        model_files = [f for f in os.listdir(model_path) if f.endswith('.pth') or f == 'model.pt']
-        if not model_files:
-            # Check if it's an MLflow model structure
-            if os.path.exists(os.path.join(model_path, 'data', 'model.pth')):
-                model_path = os.path.join(model_path, 'data', 'model.pth')
-            else:
-                model_path = os.path.join(model_path, 'data', 'model.pt')
-        else:
-            model_path = os.path.join(model_path, model_files[0])
-    
-    # Load model weights
-    state_dict = torch.load(model_path, map_location=device)
-    stage1_model.load_state_dict(state_dict)
-    stage1_model.to(device)
-    stage1_model.eval()  # Set to evaluation mode
-    
-    return stage1_model
+def load_trained_model(weights_path, inital_model, device = torch.device('cuda')):
+    if not os.path.exists(weights_path):
+        raise FileNotFoundError(f"File not found: {weights_path}")
+    model_weights = torch.load(weights_path, map_location=device, weights_only=False)
+    state_dict = model_weights if isinstance(model_weights, dict) else model_weights.state_dict()
+    inital_model.load_state_dict(state_dict)
+    inital_model.to(device)
+    inital_model.eval()
+    print(f"Loaded model weights from {weights_path}")
+    return inital_model
+
 
 def run_experiment_with_model(
     stage1_model_path: str,
     stage1_model_id: str,
     config: Dict[str, Any],
+    diffusion_config: Dict[str, Any],
     sweep_params: Dict[str, Any],
     dataloaders: Dict[str, torch.utils.data.DataLoader]
 ):
@@ -118,22 +89,19 @@ def run_experiment_with_model(
     """
     device = torch.device(config['device'])
     latent_space_dim = config['latent_space_dim']
+    stage1_model = Stage1(
+        encoder=ImageEncoder(latent_space_dim),
+        decoder=ImageDecoder(latent_space_dim),
+        decomposer=RetinexDecomposition(),
+    )
     
-    # Load Stage1 model
-    stage1_model = load_stage1_model(stage1_model_path, device, latent_space_dim)
-    
-    # Create Stage2 model
-    diffusion_net = DiffusionUNet(**config['diffusion_unet'])
+    stage1_model = load_trained_model(stage1_model_path, stage1_model, device=device)
+    diffusion_config["ch_mult"] = tuple(diffusion_config["ch_mult"])
+    diffusion_net = DiffusionUNet(**diffusion_config)
     stage2_model = Stage2(diffusion_unet=diffusion_net)
-    
-    # Create full pipeline
     model = LightenDiffusionPipeline(stage1=stage1_model, stage2=stage2_model)
     model.to(device)
-    
-    # Run name based on parameters
     run_name = f"stage1_{stage1_model_id}_lambda{sweep_params['lambda_scc']}_gamma{sweep_params['gamma']}"
-    
-    # Start MLflow run
     mlflow.set_experiment(config['experiment_name'])
     with mlflow.start_run(run_name=run_name):
         # Log parameters
@@ -157,7 +125,6 @@ def run_experiment_with_model(
             model=model,
             train_loader=dataloaders['train'],
             val_loader=dataloaders['val'],
-            criterion=stage2_loss_wrapper,
             optimizer=optimizer,
             scheduler=scheduler,
             device=device,
@@ -168,20 +135,46 @@ def run_experiment_with_model(
             betas=torch.linspace(0.0001, 0.02, steps=num_diffusion_steps),
             num_diffusion_timesteps=num_diffusion_steps,
             num_sampling_timesteps=config['num_sampling_timesteps'],
-            gamma=sweep_params['gamma']
+            gamma=sweep_params['gamma'],
+            save_visualization_dir=os.path.join("outputs", "visualizations", run_name),
         )
-        
-        # Train model
         best_model, metrics = trainer.train()
         
         # Log metrics
         mlflow.log_metric("best_val_loss", metrics['best_loss'])
         mlflow.log_metric("best_epoch", metrics['best_epoch'])
         
+        for i, loss in enumerate(metrics['train_losses']):
+            mlflow.log_metric("losses/train", float(loss), step=i)
+
+        val_steps = [j * config['val_frequency'] for j in range(len(metrics['val_losses']))]
+        for step, vloss in zip(val_steps, metrics['val_losses']):
+            mlflow.log_metric("losses/val", float(vloss), step=step)
+
+        higher = {"psnr", "ssim"}
+        lower  = {"tv_illumination", "pi", "niqe", "lpips"}
+        if hasattr(trainer, "all_val_metrics"):
+            for epoch_idx, vm in enumerate(trainer.all_val_metrics):
+                for name, val in vm.items():
+                    if name in higher:
+                        key = f"higher_is_better/val/{name}"
+                    elif name in lower:
+                        key = f"lower_is_better/val/{name}"
+                    else:
+                        key = f"val/{name}"
+                    mlflow.log_metric(key, float(val), step=epoch_idx)
+
+
         # Evaluate on test set
         test_metrics = evaluate_stage2_metrics_avgfirst(best_model, dataloaders['test'])
-        for name, value in test_metrics.items():
-            mlflow.log_metric(f"test_{name}", float(value))
+        for name, val in test_metrics.items():
+            if name in higher:
+                key = f"higher_is_better/test/{name}"
+            elif name in lower:
+                key = f"lower_is_better/test/{name}"
+            else:
+                key = f"test/{name}"
+            mlflow.log_metric(key, float(val))
         
         # Visualize results
         vis_dir = os.path.join("outputs", "visualizations", run_name)
@@ -206,16 +199,19 @@ def run_experiment_with_model(
 
 def main():
     parser = argparse.ArgumentParser(description="Run Stage2 experiment with loss weight sweep")
-    parser.add_argument("--config", type=str, required=True, help="Path to experiment config file")
+    parser.add_argument(
+        "--config", 
+        type=str, 
+        default="experiments/configs/sweep_stage2_loss_weights.yaml", 
+        help="Path to experiment config file"
+    )
     args = parser.parse_args()
     
     # Load configuration
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
-    
     base_config = config["base"]
-    
-    # Setup MLflow tracking
+    diffusion_config = config["diffusion_unet"]
     setup_mlflow_tracking(tracking_uri)
     
     # Get top Stage1 models
@@ -251,6 +247,7 @@ def main():
                 stage1_model_path=model_path,
                 stage1_model_id=model_id[:8],  # Short ID for naming
                 config=base_config,
+                diffusion_config=diffusion_config,
                 sweep_params=sweep_params,
                 dataloaders=dataloaders
             )

@@ -2,8 +2,8 @@ import torch
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from typing import Tuple, Optional, List
-
+from typing import Optional, List
+import os
 from .visualize_stage1 import tensor_to_image
 from .visualization_utils import map_to_rgb
 
@@ -29,7 +29,8 @@ def visualize_stage2_results_aggregate(
     pipeline: torch.nn.Module,
     data_loader: DataLoader,
     num_samples: int = 1,
-    random_seed: int = 42
+    random_seed: int = 42,
+    save_dir: Optional[str] = None,
 ) -> None:
     """
     Visualizes aggregated outputs from the Stage2 diffusion process along with the final
@@ -198,14 +199,22 @@ def visualize_stage2_results_aggregate(
         axes[1, 5].set_title(r"$I_{\mathrm{low}}^{\hat{}}$")
         axes[1, 5].axis("off")
         
-        plt.tight_layout()
+    if save_dir:
+        for i, fig_num in enumerate(plt.get_fignums()):
+            fig = plt.figure(fig_num)
+            fig_path = os.path.join(save_dir, f"sample_{i}.png")
+            fig.savefig(fig_path)
+            plt.close(fig)
+    else:
         plt.show()
+
 
 def visualize_stage2_results(
     pipeline: torch.nn.Module,
     data_loader: DataLoader,
     num_samples: int = 1,
-    random_seed: int = 42
+    random_seed: int = 42,
+    save_dir: Optional[str] = None,
 ) -> None:
     """
     Top-level visualization function for Stage2 results using aggregated outputs.
@@ -216,4 +225,9 @@ def visualize_stage2_results(
         num_samples (int): Number of samples to display.
         random_seed (int): Seed for random selection.
     """
-    visualize_stage2_results_aggregate(pipeline, data_loader, num_samples, random_seed)
+    visualize_stage2_results_aggregate(
+        pipeline, 
+        data_loader, 
+        num_samples, 
+        random_seed,
+        save_dir)

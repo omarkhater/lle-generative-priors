@@ -6,14 +6,12 @@ import argparse
 from dotenv import load_dotenv, find_dotenv
 import matplotlib
 matplotlib.use('Agg')
-
-from frameworks.LightenDiffusion.models.LightenDiffusion import Stage1, Stage2, LightenDiffusionPipeline
+from frameworks.LightenDiffusion.models.LightenDiffusion import Stage2, LightenDiffusionPipeline
 from frameworks.LightenDiffusion.models.unet import DiffusionUNet
-from frameworks.LightenDiffusion.models.decom import ImageEncoder, ImageDecoder, RetinexDecomposition
 from frameworks.LightenDiffusion.training.stage2 import Stage2Trainer
 from frameworks.LightenDiffusion.losses import stage2_loss_wrapper
 from eda.helpers.training_helpers import get_optimizer, get_scheduler
-from experiments.utils import setup_dataloaders, ExperimentConfig
+from experiments.utils.general_utils import setup_dataloaders, ExperimentConfig
 from utils.mlflow_utils import setup_mlflow_tracking, create_experiment_group, log_dict_as_params
 from evaluation.lighten_diffusion_stage2 import evaluate_stage2_metrics_avgfirst
 from experiments.scripts.stage2_loss_weights import visualize_and_save_samples, load_stage1_model
@@ -175,7 +173,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--config', 
         type=str,
-        required=True, 
+        required=True,
         help='Path to experiment config file'
     )
     parser.add_argument(
