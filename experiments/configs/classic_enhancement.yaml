@@ -1,0 +1,23 @@
+experiment_name: "classic_enhancement_experiment"
+description: "Baseline experiment using classic image enhancement techniques"
+
+# Data configuration
+data_name: "SICE_paired"
+dataset_id: "okhater/SICE"
+source: "huggingface"
+batch_size: 16
+shuffle: true
+num_visualization_samples: 4
+
+# Enhancement parameters
+brightness: 2.5
+contrast: 1.8
+sharpness: 1.3
+saturation: 1.2
+gamma: 0.7
+use_clahe: true
+clahe_clip_limit: 2.0
+clahe_grid_size: 8
+
+# Device configuration
+device: "cuda"
