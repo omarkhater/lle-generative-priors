@@ -24,7 +24,7 @@ max_experiments: 10
 # DiffusionUNet parameters to sweep
 diffusion_unet_params:
   num_res_blocks: [2, 3]
-  ch_mult: [[1, 2, 3, 4], [1, 2, 4, 8], [4, 8, 16, 32]]
+  ch_mult: [[1, 2, 3, 4]]
   dropout: [0.0, 0.1, 0.2]
   resamp_with_conv: [true]
   num_diffusion_timesteps: [100, 500, 1000]
@@ -44,7 +44,7 @@ training:
 
 # GPU configuration
 gpu:
-  parallel: true    # Whether to use multiple GPUs
+  parallel: false    # Whether to use multiple GPUs
   device_ids: "auto"  # "auto" or a list like [0, 1]
 
 # Visualization settings

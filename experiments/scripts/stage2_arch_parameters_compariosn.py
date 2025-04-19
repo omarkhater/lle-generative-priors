@@ -412,7 +412,7 @@ class Stage2ParameterSweepExperiment(ExperimentBase):
         elif use_parallel and isinstance(device_ids, list):
             device_ids = device_ids
         else:
-            device_ids = [self.device_id]  # Use the default device
+            device_ids = [0]
 
         for i, (stage1_model, diffusion_params) in enumerate(tqdm(variations, desc="Processing variations")):
             if use_parallel and len(device_ids) > 1:
@@ -481,7 +481,7 @@ class Stage2ParameterSweepExperiment(ExperimentBase):
 
                     self.visualize(
                         model=best_model,
-                        dataloaders=dataloaders.get('test'),
+                        dataloader=dataloaders.get('test'),
                     )
                     self._log_visualization_artifacts()
                     
