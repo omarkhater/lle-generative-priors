@@ -69,8 +69,8 @@ def setup_dataloaders(config: ExperimentConfig):
     """
     dataset_name = config.get('dataset_name')
     dataset_id = config.get('dataset_id')
-    batch_size = config.get('batch_size', 16)
-    val_split_ratio = config.get('val_split_ratio', 0.2)
+    batch_size = config.get('batch_size')
+    val_split_ratio = config.get('val_split_ratio')
     registry = DatasetManager()
     registry.initialize_dataset(
         name=dataset_name,

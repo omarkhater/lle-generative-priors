@@ -1,0 +1,57 @@
+experiment_name: "stage2_architecture_parameters_sensitivity_analysis"
+description: |
+  This configuration runs a parameter sweep for Stage 2 DiffusionUNet architectures
+  using top-performing Stage 1 models. The experiment tests different network depths,
+  channel multipliers, dropout rates, and diffusion timesteps to identify optimal
+  Stage 2 model architectures.
+run_name: "stage2_arch_sweep"
+random_seed: 42
+data_name: "SICE_paired"
+dataset_id: "okhater/SICE"
+source: "huggingface"
+batch_size: 4
+
+# Stage 1 model selection
+source_experiment: "stage1_architecture_parameters_sensitivity"
+model_selection:
+  metric: "metrics/val/niqe"  # Metric to use for finding best Stage 1 models
+  top_k: 3                    # Number of top models to use
+  higher_is_better: False      # Whether higher metric values are better
+
+# Maximum number of experiments to run (-1 for all combinations)
+max_experiments: 10
+
+# DiffusionUNet parameters to sweep
+diffusion_unet_params:
+  num_res_blocks: [2, 3]
+  ch_mult: [[1, 2, 3, 4], [1, 2, 4, 8], [4, 8, 16, 32]]
+  dropout: [0.0, 0.1, 0.2]
+  resamp_with_conv: [true]
+  num_diffusion_timesteps: [100, 500, 1000]
+
+stage2_loss_params:
+  gamma: 0.5        # Illumination correction factor.
+  lambda_scc: 0.001  # weight for self consistency loss
+
+training:
+  learning_rate: 1e-5
+  epochs: 100
+  val_frequency: 5
+  patience: 10
+  weight_decay: 1e-4
+  use_scheduler: true
+  scheduler_gamma: 0.8
+
+# GPU configuration
+gpu:
+  parallel: true    # Whether to use multiple GPUs
+  device_ids: "auto"  # "auto" or a list like [0, 1]
+
+# Visualization settings
+num_visualizations: 4
+
+# Optional: S3 upload configuration
+upload_to_s3: false
+s3:
+  bucket: "lle-experiments"
+  prefix: "stage2-models"
