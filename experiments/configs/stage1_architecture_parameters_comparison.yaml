@@ -1,0 +1,74 @@
+experiment_name: stage1_architecture_parameters_sensitivity
+description: |
+  This configuration file is used to run a series of experiments to evaluate the sensitivity of the model's performance to different architecture parameters.
+  The goal is to identify the best-performing architecture for the given dataset and task.
+  Each variation will be trained and evaluated separately, and the results will be compared to determine the optimal architecture.
+run_name: architecture_variations
+data_name: "SICE_paired"
+dataset_id: "okhater/SICE"
+source: "huggingface"
+batch_size: 8
+learning_rate: 0.0001
+num_epochs: 12
+val_frequency: 3 
+patience: 2
+weight_cont: 0.1
+weight_rec: 1.0
+weight_ref: 0.1
+weight_ill: 0.1
+lambda_g: 0.2
+num_visualizations: 4
+random_seed: 42
+device: cuda
+upload_to_s3: true
+s3_bucket: lle-experiments
+
+variations:
+  - name: baseline
+    base_channels: 64
+    channel_factors: [1, 2, 4]
+    encoded_channels: 64
+    num_cross_attention_heads: 8
+    num_self_attention_heads: 8
+  
+  - name: wider_network
+    base_channels: 96
+    channel_factors: [1, 2, 4]
+    encoded_channels: 96
+    num_cross_attention_heads: 8
+    num_self_attention_heads: 8
+  
+  - name: deeper_pyramid
+    base_channels: 64
+    channel_factors: [1, 2, 4, 8]
+    encoded_channels: 64
+    num_cross_attention_heads: 8
+    num_self_attention_heads: 8
+  
+  - name: more_attention_heads
+    base_channels: 64
+    channel_factors: [1, 2, 4]
+    encoded_channels: 64
+    num_cross_attention_heads: 16
+    num_self_attention_heads: 16
+
+  - name: less_attention_heads
+    base_channels: 64
+    channel_factors: [1, 2, 4]
+    encoded_channels: 64
+    num_cross_attention_heads: 4
+    num_self_attention_heads: 4
+  
+  - name: smaller_network
+    base_channels: 32
+    channel_factors: [1, 2, 4]
+    encoded_channels: 32
+    num_cross_attention_heads: 8
+    num_self_attention_heads: 8
+  
+  - name: mixed_attention
+    base_channels: 64
+    channel_factors: [1, 2, 4]
+    encoded_channels: 64
+    num_cross_attention_heads: 4
+    num_self_attention_heads: 16

@@ -15,6 +15,7 @@ class ExperimentConfig:
             config_path: Path to YAML config file
             config_dict: Dictionary with configuration (alternative to config_path)
         """
+        self.config_path = config_path
         if config_path is not None:
             with open(config_path, 'r') as f:
                 self.config = yaml.safe_load(f)
