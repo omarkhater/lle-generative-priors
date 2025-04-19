@@ -165,3 +165,4 @@ cython_debug/
 eda/
 outputs/
 experiments/results/
+trained_models/
