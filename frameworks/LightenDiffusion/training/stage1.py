@@ -273,7 +273,7 @@ class Stage1Trainer(BaseTrainer):
         """
 
         content_threshold = int(self.num_epochs * self.pretrain_content_ratio)
-        ctdn_threshold = int(self.num_epochs * self.pretrain_ctdn_ratio)
+        ctdn_threshold = int(self.num_epochs * self.pretrain_ctdn_ratio) + content_threshold
         if epoch_number < content_threshold:
             logging.info(f"[📚] Curriculum: Training with content loss only until epoch {content_threshold}")
             self.weight_rec = self.weight_ref = self.weight_ill = 0.0
@@ -421,6 +421,6 @@ class Stage1Trainer(BaseTrainer):
                 stats[f"grad/{name}/mean"] = 0.0
                 stats[f"grad/{name}/min"]  = 0.0
                 stats[f"grad/{name}/max"]  = 0.0
-        logging.info(f"epoch: {self.current_epoch}, Gradient stats\n{stats}")
+        # logging.info(f"epoch: {self.current_epoch}, Gradient stats\n{stats}")
         if mlflow.active_run():
             mlflow.log_metrics(stats, step=self.current_epoch)
