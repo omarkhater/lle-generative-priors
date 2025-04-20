@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader
 from .visualization_utils import map_to_rgb, tensor_to_image, get_visualization_batch
 from typing import Optional, Tuple, List, Dict, Any
 import os
+import mlflow
 
 def extract_low_quality_images(sample_batch: torch.Tensor) -> torch.Tensor:
     """
@@ -205,6 +206,13 @@ def visualize_stage1_results(
     stage1.eval()
     device = next(stage1.parameters()).device
 
+    if num_samples < 1:
+        return
+    if num_samples > len(data_loader.dataset):
+        num_samples = len(data_loader.dataset)
+    if save_dir and not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
     if show_plot:
         plt.ion()
     else:
@@ -214,7 +222,7 @@ def visualize_stage1_results(
     B, m, _, _, _ = sample_batch.shape
 
     with torch.no_grad():
-        outputs: List[Dict[str, Any]] = stage1(sample_batch)
+        outputs = stage1(sample_batch)
 
     low_quality = extract_low_quality_images(sample_batch)
     encoded_feats = extract_encoded_features(outputs, m)
@@ -224,6 +232,11 @@ def visualize_stage1_results(
 
     figs = plot_stage1_figures(low_quality, encoded_feats, R, L, RL_product,
                                reconstruction, gt_batch, num_samples, m, is_paired)
+    
+    if mlflow.active_run():
+        for idx, fig in enumerate(figs):
+            mlflow.log_figure(fig, f"sample_{idx}.png")
+            plt.close(fig)
     
     if save_dir:
         for idx, fig in enumerate(figs):

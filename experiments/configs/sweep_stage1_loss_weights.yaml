@@ -1,6 +1,6 @@
 base:
-  experiment_name: "stage1_loss_weights_sweep"
-  num_epochs: 15
+  experiment_name: "stage1_loss_weights_sweep_curricular_pilot"
+  num_epochs: 5
   device: cuda
   dataset_name: "SICE_paired"
   dataset_id: "okhater/SICE"
@@ -12,7 +12,9 @@ base:
   val_frequency: 3
   use_scheduler: true
   scheduler_gamma: 0.8
-
+  pretrain_content_ratio: .33
+  pretrain_ctdn_ratio: .33
+  local_save_directory: "experiments/artifacts"
 
 sweep:
   weight_cont: [0.05, 0.1, 0.2, .5, 1]
