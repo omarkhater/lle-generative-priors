@@ -1,6 +1,8 @@
 base:
-  experiment_name: "stage1_loss_weights_sweep_curricular_pilot"
-  num_epochs: 5
+  experiment_name: "stage1_gradnorm_adaptive‐ctdn_sweep"
+  run_name: "GradNorm‑based adaptive loss weighting"
+  description: "Train Stage‑1 of LightenDiffusion with GradNorm‑learned global loss weights (content vs CTDN) while Bayesian‑sweeping the internal CTDN terms — weight_rec, weight_ref, weight_ill, and lambda_g — to discover the best decomposition balance without manual tuning."
+  num_epochs: 50
   device: cuda
   dataset_name: "SICE_paired"
   dataset_id: "okhater/SICE"
@@ -8,22 +10,25 @@ base:
   val_split_ratio: 0.2
   learning_rate: 1e-5
   weight_decay: 1e-4
-  patience: 3
+  patience: 5
   val_frequency: 3
   use_scheduler: true
   scheduler_gamma: 0.8
-  pretrain_content_ratio: .33
-  pretrain_ctdn_ratio: .33
-  local_save_directory: "experiments/artifacts"
+  pretrain_content_ratio: .1
+  pretrain_ctdn_ratio: .15
+  local_save_directory: "/home/grads/o/omarkhater/projects/lle-generative-priors/experiments/artifacts"
+  objective_metric: "psnr"
+  n_trials: 10
+
+  s3_upload:
+    prefix: "experiments/artifacts"
+    bucket: "lle-generative-priors"
 
 sweep:
-  weight_cont: [0.05, 0.1, 0.2, .5, 1]
-  weight_rec: [0.05, 0.1, 0.2, .5, 1, 5, 10]
-  weight_ref: [0.05, 0.1, 0.2, .5, 1, 5, 10]
-  weight_ill: [0.05, 0.1, 0.2, .5, 1, 5, 10]
-  lambda_g: [0.05, 0.1, 0.2, .5, 1, 5, 10]
-  train_dataset: ['SICE']
-  test_dataset: ['SICE']
+  weight_rec: {start: 0.05, end: 3, scale: "log"} # CTDN reconstruction term
+  weight_ref: {start: 0.0001, end: 1, scale: "log"} # CTDN reflectance‑consistency term
+  weight_ill: {start: 0.0001, end: 1, scale: "log"} # CTDN illumination‑smoothness term
+  lambda_g: {start: 0.05, end: 10, scale: "log"} # Edge‑aware smoothing coefficient in L_ill
 
 encoder:
   base_channels: 64
