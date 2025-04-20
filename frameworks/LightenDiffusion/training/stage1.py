@@ -12,6 +12,23 @@ from .tqdm_configuration import TqdmManager
 import os
 from frameworks.LightenDiffusion.models.stage1 import Stage1
 
+
+def with_curriculum(fn):
+    """
+        Decorator to apply curriculum learning before each training epoch.
+    """
+    def wrapper(self, epoch_number: int = None) -> dict:
+        """
+        Apply curriculum learning before each training epoch.
+        Args:
+            epoch_number (int): Current epoch number.
+        Returns:
+            dict: Dictionary containing average total loss, weighted content loss, and ctdn loss.
+        """
+        self._apply_curriculum(epoch_number)
+        return fn(self, epoch_number)
+    return wrapper
+
 class Stage1Trainer(BaseTrainer):
     """
     Trainer for Stage1 (Encoder + Retinex Decomposition + Decoder).
@@ -36,8 +53,8 @@ class Stage1Trainer(BaseTrainer):
         weight_ref: float = 0.1,
         weight_ill: float = 0.1,
         lambda_g: float = 0.2,
-        pretrain_content_epochs: int = 5,
-        pretrain_ctdn_epochs: int = 5,
+        pretrain_content_ratio: float = .05, 
+        pretrain_ctdn_ratio: float = .1,
         num_visualizations: int = 1,
         random_seed: int = 42,
         after_validate: bool = True,
@@ -63,8 +80,8 @@ class Stage1Trainer(BaseTrainer):
             weight_ref (float): Weight for reflectance-consistency term in ctdn_loss.
             weight_ill (float): Weight for illumination-smoothness term in ctdn_loss.
             lambda_g (float): Exponential weighting factor for gradient in ctdn_loss.
-            pretrain_content_epochs (int): Number of epochs to pretrain the content loss.
-            pretrain_ctdn_epochs (int): Number of epochs to pretrain the ctdn loss.
+            pretrain_content_ratio: Fraction of total epochs to train with content-only.
+            pretrain_ctdn_ratio: Fraction of total epochs to train with CTDN-only.
             num_visualizations (int): Number of samples to visualize during validation.
             random_seed (int): Seed for random selection of samples.
             after_validate (bool): Whether to run after-validation
@@ -100,14 +117,21 @@ class Stage1Trainer(BaseTrainer):
         self.after_validate = after_validate
         self.all_val_metrics = []
         self.debug_gradients = debug_gradients
-        self.pretrain_content_epochs = pretrain_content_epochs
-        self.pretrain_ctdn_epochs = pretrain_ctdn_epochs
+        self.pretrain_content_ratio = pretrain_content_ratio
+        self.pretrain_ctdn_ratio = pretrain_ctdn_ratio
         if self.debug_gradients:
             self.debug_gradients_every = debug_gradients_every
         else:
             self.debug_gradients_every = None
         self.show_plot = show_plot
         self.save_dir = save_dir
+
+        self._final_weights = {
+            'cont': weight_cont,
+            'rec': weight_rec,
+            'ref': weight_ref,
+            'ill': weight_ill
+        }
 
         logging.getLogger().setLevel(logging.DEBUG if self.debug_gradients else logging.INFO)
         self._validate_dimensions(train_loader, "train_loader")
@@ -185,6 +209,8 @@ class Stage1Trainer(BaseTrainer):
 
         return loss_total, loss_ctdn, loss_con
 
+
+    @with_curriculum
     def train_epoch(self, epoch_number: int = None) -> dict:
         """
         Train for one epoch in unsupervised Stage1:
@@ -192,15 +218,15 @@ class Stage1Trainer(BaseTrainer):
           2) Stack reflectances/illuminations => [B, m, C, H, W]
           3) ctdn_loss(...) => cross reconstruction + reflectance consistency + illumination smoothness
 
+        Phased curriculum adjustments applied. 
+
         Args:
             None
         Returns:
             dict: Dictionary containing average total loss, weighted content loss, and ctdn loss.
         """
         self.model.train()
-        running_loss = 0.0
-        running_ctdn_loss = 0.0
-        running_con_loss = 0.0
+        running_loss = running_ctdn_loss = running_con_loss = 0.0
 
         batch_bar = TqdmManager(
             total=len(self.train_loader), 
@@ -247,6 +273,39 @@ class Stage1Trainer(BaseTrainer):
             'weighted_content_loss': weighted_loss_content,
             'ctdn_loss': avg_ctdn_loss,
         }
+
+    def _apply_curriculum(self, epoch_number: int) -> None:
+        """
+        Adjust loss weights & parameter freezing based on epoch fraction. 
+        
+        Args:
+            epoch_number (int): Current epoch number.
+
+        """
+
+        content_threshold = int(self.num_epochs * self.pretrain_content_ratio)
+        ctdn_threshold = int(self.num_epochs * self.pretrain_ctdn_ratio)
+        if epoch_number < content_threshold:
+            logging.info(f"[📚] Curriculum: Training with content loss only until epoch {content_threshold}")
+            self.weight_rec = self.weight_ref = self.weight_ill = 0.0
+            for p in self.model.encoder.parameters(): p.requires_grad = True
+            for p in self.model.decoder.parameters(): p.requires_grad = True
+        
+        elif epoch_number < ctdn_threshold:
+            logging.info(f"[📚] Curriculum: Training with CTDN loss only until epoch {ctdn_threshold}")
+   
+            self.weight_rec = self._final_weights['rec']
+            self.weight_ref = self._final_weights['ref']
+            self.weight_ill = self._final_weights['ill']
+            for p in self.model.encoder.parameters(): p.requires_grad = False
+            for p in self.model.decoder.parameters(): p.requires_grad = False
+        else:
+            logging.info(f"[📚] Curriculum: Training with full loss after epoch {ctdn_threshold}")
+            for p in self.model.parameters(): p.requires_grad = True
+            self.weight_cont = self._final_weights['cont']
+            self.weight_rec  = self._final_weights['rec']
+            self.weight_ref  = self._final_weights['ref']
+            self.weight_ill  = self._final_weights['ill']
 
     def _debug_gradients(
             self

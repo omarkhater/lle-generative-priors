@@ -41,7 +41,7 @@ def reconstruction_loss(
             L_j = illuminations[:, j]
             F_j = features[:, j]
             recon_ij = R_i * L_j
-            loss_sum += F.l1_loss(F_j.detach(), recon_ij)
+            loss_sum += F.l1_loss(F_j, recon_ij)
     return loss_sum
 
 
