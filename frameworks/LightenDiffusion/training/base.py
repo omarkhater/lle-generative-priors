@@ -182,7 +182,7 @@ class BaseTrainer(ABC):
                 unit="epoch",
             )
             for epoch in range(self.num_epochs):
-                loss_dict = self.train_epoch(epoch+1)
+                loss_dict = self.train_epoch()
 
                 train_loss = loss_dict.get("total_loss")
                 if train_loss is None:
