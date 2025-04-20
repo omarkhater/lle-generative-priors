@@ -11,7 +11,8 @@ import logging
 from .tqdm_configuration import TqdmManager
 import os
 from frameworks.LightenDiffusion.models.stage1 import Stage1
-
+import mlflow
+import numpy as np
 
 def with_curriculum(fn):
     """
@@ -25,8 +26,8 @@ def with_curriculum(fn):
         Returns:
             dict: Dictionary containing average total loss, weighted content loss, and ctdn loss.
         """
-        self._apply_curriculum(epoch_number)
-        return fn(self, epoch_number)
+        self._apply_curriculum(self.current_epoch)
+        return fn(self)
     return wrapper
 
 class Stage1Trainer(BaseTrainer):
@@ -58,8 +59,6 @@ class Stage1Trainer(BaseTrainer):
         num_visualizations: int = 1,
         random_seed: int = 42,
         after_validate: bool = True,
-        debug_gradients: bool = False,
-        debug_gradients_every: int = 5,
         show_plot: bool = True,
         save_dir: str = None,
 
@@ -85,8 +84,6 @@ class Stage1Trainer(BaseTrainer):
             num_visualizations (int): Number of samples to visualize during validation.
             random_seed (int): Seed for random selection of samples.
             after_validate (bool): Whether to run after-validation
-            debug_gradients (bool): Whether to debug gradients.
-            debug_gradients_every (int): Frequency of debugging gradients.
             show_plot (bool): Whether to show the plots when validating the model
             save_dir (str): Directory to save the model checkpoints. If None, no visuals are saved.
 
@@ -116,15 +113,11 @@ class Stage1Trainer(BaseTrainer):
         self.random_seed = random_seed
         self.after_validate = after_validate
         self.all_val_metrics = []
-        self.debug_gradients = debug_gradients
         self.pretrain_content_ratio = pretrain_content_ratio
         self.pretrain_ctdn_ratio = pretrain_ctdn_ratio
-        if self.debug_gradients:
-            self.debug_gradients_every = debug_gradients_every
-        else:
-            self.debug_gradients_every = None
         self.show_plot = show_plot
         self.save_dir = save_dir
+        self.num_epochs = num_epochs
 
         self._final_weights = {
             'cont': weight_cont,
@@ -132,8 +125,8 @@ class Stage1Trainer(BaseTrainer):
             'ref': weight_ref,
             'ill': weight_ill
         }
+        self.current_epoch = 0
 
-        logging.getLogger().setLevel(logging.DEBUG if self.debug_gradients else logging.INFO)
         self._validate_dimensions(train_loader, "train_loader")
         self._validate_dimensions(val_loader, "val_loader")
         self._validate_model_format()
@@ -211,7 +204,7 @@ class Stage1Trainer(BaseTrainer):
 
 
     @with_curriculum
-    def train_epoch(self, epoch_number: int = None) -> dict:
+    def train_epoch(self) -> dict:
         """
         Train for one epoch in unsupervised Stage1:
           1) Forward pass: model(low_imgs) => list of dictionaries [ {R, L}, {R, L}, ... ]
@@ -227,7 +220,7 @@ class Stage1Trainer(BaseTrainer):
         """
         self.model.train()
         running_loss = running_ctdn_loss = running_con_loss = 0.0
-
+        self.current_epoch += 1
         batch_bar = TqdmManager(
             total=len(self.train_loader), 
             desc="Training Batches", 
@@ -241,11 +234,7 @@ class Stage1Trainer(BaseTrainer):
             loss_total, loss_ctdn, loss_con = self.calculate_loss(*loss_tesnors)
             self.optimizer.zero_grad()
             loss_total.backward()
-
-            if self.debug_gradients and self.debug_gradients_every is not None and i == 0:
-                if epoch_number % self.debug_gradients_every == 0:
-                    logging.debug(f"[🔍] Epoch {epoch_number}: Batch 0 - Debugging gradients")
-                    self._debug_gradients() 
+            self._log_gradient_stats()
             self.optimizer.step()
 
             running_loss += loss_total.item()
@@ -306,31 +295,6 @@ class Stage1Trainer(BaseTrainer):
             self.weight_rec  = self._final_weights['rec']
             self.weight_ref  = self._final_weights['ref']
             self.weight_ill  = self._final_weights['ill']
-
-    def _debug_gradients(
-            self
-        ) -> None:
-        """
-        Debug gradients for the model parameters.
-
-        Args:
-            batch_number (int): Current batch number.
-            epoch_number (int): Current epoch number.
-            log_freq (int): Frequency of logging gradients.
-        """
-        components = (
-            ("encoder", self.model.encoder),
-            ("decoder", self.model.decoder),
-            ("decomposer", self.model.decomposer),
-        )
-            
-        for part_name, module in components:
-            for pname, p in module.named_parameters():
-                if p.grad is not None:
-                    logging.debug(f"[✅] {part_name} has grad ||.|| = {p.grad.norm()}")
-                else:
-                    logging.debug(f"[⚠️] {part_name} has no grad")
-
 
     def validate_batch(self, batch: tuple) -> float:
         """
@@ -440,3 +404,23 @@ class Stage1Trainer(BaseTrainer):
             torch.Tensor: A random tensor of shape [1, m, 3, H, W].
         """
         return torch.randn(1, 2, 3, 64, 64, device=self.device)
+    
+    def _log_gradient_stats(self):
+        stats = {}
+        for name, module in (
+            ("encoder",    self.model.encoder),
+            ("decomposer", self.model.decomposer),
+            ("decoder",    self.model.decoder),
+        ):
+            norms = [p.grad.norm().item() for p in module.parameters() if p.grad is not None]
+            if norms:
+                stats[f"grad/{name}/mean"] = float(np.mean(norms))
+                stats[f"grad/{name}/min"]  = float(np.min(norms))
+                stats[f"grad/{name}/max"]  = float(np.max(norms))
+            else:
+                stats[f"grad/{name}/mean"] = 0.0
+                stats[f"grad/{name}/min"]  = 0.0
+                stats[f"grad/{name}/max"]  = 0.0
+        logging.info(f"epoch: {self.current_epoch}, Gradient stats\n{stats}")
+        if mlflow.active_run():
+            mlflow.log_metrics(stats, step=self.current_epoch)

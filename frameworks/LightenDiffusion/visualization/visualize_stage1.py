@@ -1,5 +1,6 @@
 import torch
 import matplotlib.pyplot as plt
+import matplotlib  # added to inspect backend
 from torch.utils.data import DataLoader
 from .visualization_utils import map_to_rgb, tensor_to_image, get_visualization_batch
 from typing import Optional, Tuple, List, Dict, Any
@@ -229,7 +230,8 @@ def visualize_stage1_results(
             fig_path = os.path.join(save_dir, f"sample_{idx}.png")
             fig.savefig(fig_path)
             plt.close(fig)
-    else:
-        if show_plot:
-            for fig in figs:
-                fig.show()
+    
+    if show_plot:
+        plt.show()
+
+
