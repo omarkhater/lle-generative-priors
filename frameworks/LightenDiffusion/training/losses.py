@@ -21,6 +21,9 @@ def reconstruction_loss(
        L_rec = sum_{i=1}^m sum_{j=1}^m || F^j - R^i * L^j ||_1.
     
     It aims to guarantee the decomposed components can reconstruct the encoded features.
+
+    The encoder features are detached to prevent gradients from flowing back to the encoder.
+    This, in turn, prevents the encoder from being updated during the training of the CTDN.
     
     Args:
         reflectances: Stacked reflectance maps for each of the m low-light frames. Expected shape [B, m, C, H, W].

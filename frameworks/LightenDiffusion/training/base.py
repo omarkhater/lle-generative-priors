@@ -182,14 +182,14 @@ class BaseTrainer(ABC):
                 unit="epoch",
             )
             for epoch in range(self.num_epochs):
-                loss_dict = self.train_epoch()
+                loss_dict = self.train_epoch(epoch+1)
 
                 train_loss = loss_dict.get("total_loss")
                 if train_loss is None:
                     raise ValueError("Training loss not found in loss_dict. Does train_epoch return a key = total_loss?")
                 
                 self.train_losses.append(train_loss)
-                epoch_bar.set_postfix(epoch=f"{epoch+1}", train_loss=f"{train_loss:.4f}")
+                epoch_bar.set_postfix(train_loss=f"{train_loss:.4f}")
                 if mlflow.active_run():
                     mlflow.log_metric(f"{prefix}total", train_loss, step=epoch)
                     for key, value in loss_dict.items():
@@ -199,7 +199,7 @@ class BaseTrainer(ABC):
                     val_loss = self.validate(epoch+1)
                     self.val_losses.append(val_loss)
                     logging.info(f"Epoch {epoch+1}/{self.num_epochs}: train={train_loss:.4f}, val={val_loss:.4f}")                    
-                    epoch_bar.set_postfix(epoch=f"{epoch+1}", train_loss=f"{train_loss:.4f}", val_loss=f"{val_loss:.4f}")
+                    epoch_bar.set_postfix(train_loss=f"{train_loss:.4f}", val_loss=f"{val_loss:.4f}")
                     stop, num_bad = self._check_early_stopping(epoch, val_loss, num_bad)
                     if stop:
                         break

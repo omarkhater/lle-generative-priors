@@ -203,6 +203,12 @@ def visualize_stage1_results(
     torch.manual_seed(seed)
     stage1.eval()
     device = next(stage1.parameters()).device
+
+    if show_plot:
+        plt.ion()
+    else:
+        plt.ioff()
+
     sample_batch, gt_batch = get_visualization_batch(data_loader, is_paired, device)
     B, m, _, _, _ = sample_batch.shape
 
