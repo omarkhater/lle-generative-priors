@@ -37,7 +37,13 @@ class Stage1Trainer(BaseTrainer):
     For Stage1 training, each training sample must contain paired low images with shape [B, m, 3, H, W].
     The model's forward method is expected to return a list of dictionaries, where each dictionary contains keys 
     such as "R", "L", "recon", and "f". The loss is computed by combining a ctdn_loss with a weighted content loss.
+    
+    Class Attributes:
+        higher_is_better (set): Evaluation Metrics that are better when higher. To be used in mlflow logging.
+        lower_is_better (set): Evaluation Metrics that are better when lower. To be used in mlflow logging.
     """
+    higher_is_better = {"psnr", "ssim"}
+    lower_is_better = {"tv_illumination", "pi", "niqe", "lpips"}
     def __init__(
         self,
         model: Stage1,
@@ -58,11 +64,10 @@ class Stage1Trainer(BaseTrainer):
         pretrain_ctdn_ratio: float = .1,
         num_visualizations: int = 1,
         random_seed: int = 42,
-        after_validate: bool = True,
         show_plot: bool = True,
         save_dir: str = None,
 
-    ):
+    ) -> None:
         """
         Args:
             model (nn.Module): The Stage1 model (Encoder + Retinex + Decoder).
@@ -83,10 +88,9 @@ class Stage1Trainer(BaseTrainer):
             pretrain_ctdn_ratio: Fraction of total epochs to train with CTDN-only.
             num_visualizations (int): Number of samples to visualize during validation.
             random_seed (int): Seed for random selection of samples.
-            after_validate (bool): Whether to run after-validation
             show_plot (bool): Whether to show the plots when validating the model
-            save_dir (str): Directory to save the model checkpoints. If None, no visuals are saved.
-
+            save_dir (str, optional): Directory to save training artifcats (visuals+models) if provided.
+            
         """
         super().__init__(
             model, 
@@ -111,12 +115,13 @@ class Stage1Trainer(BaseTrainer):
         self.val_losses: List[float] = []
         self.num_visualizations = num_visualizations
         self.random_seed = random_seed
-        self.after_validate = after_validate
         self.all_val_metrics = []
         self.pretrain_content_ratio = pretrain_content_ratio
         self.pretrain_ctdn_ratio = pretrain_ctdn_ratio
         self.show_plot = show_plot
         self.save_dir = save_dir
+        if self.save_dir and not os.path.exists(self.save_dir):
+            os.makedirs(self.save_dir, exist_ok=True)
         self.num_epochs = num_epochs
 
         self._final_weights = {
@@ -315,28 +320,49 @@ class Stage1Trainer(BaseTrainer):
         return loss_total
 
     
-    def after_validation(self, epoch: int):
-        if self.after_validate:
-            val_metrics = evaluate_stage1_metrics_individual(self.model, self.val_loader)
-            self.all_val_metrics.append(val_metrics)
-            if self.num_visualizations > 0:
-                if self.save_dir:
-                    save_dir = f"{self.save_dir}/epoch_{epoch}" 
-                    os.makedirs(save_dir, exist_ok=True)
-                else:
-                    save_dir = None
+    def after_training(self) -> None:
+        """
+        Save the best model and log metrics to mlflow.
 
-                visualize_stage1_results(
-                    self.model, 
-                    self.val_loader, 
-                    num_samples=self.num_visualizations,
-                    seed=self.random_seed,
-                    save_dir=save_dir,
-                    show_plot=self.show_plot
-                )
+        """
+        train_metrics = evaluate_stage1_metrics_individual(
+            self.model, 
+            self.train_loader
+        )
+        self._log_evaluation_metrics(train_metrics, prefix="train")
+
+        local_path = f"{self.save_dir}/model/best_model.pth" if self.save_dir else None
+        self.save_pytorch_model(self.best_state, local_path)
+        if mlflow.active_run():
+            mlflow.log_artifact(local_path, self.best_state)
+            mlflow.log_metric("best_val_loss", self.best_loss)
+            mlflow.log_metric("best_val_epoch", self.best_epoch)
+            mlflow.pytorch.log_model(self.model, "model")
+        return 
+    
+    def after_validation(self, epoch: int) -> None:
+        """
+        Save the best model and log metrics to mlflow.
+
+        Args:
+            epoch (int): Current epoch number.
+
+        """
+        val_metrics = evaluate_stage1_metrics_individual(self.model, self.val_loader)
+        self.all_val_metrics.append(val_metrics)
+        self._log_evaluation_metrics(val_metrics, prefix="val")
+        epoch_visuals_save_dir = f"{self.save_dir}/epoch_{epoch}" if self.save_dir else None
+        visualize_stage1_results(
+            self.model, 
+            self.val_loader, 
+            num_samples=self.num_visualizations,
+            seed=self.random_seed,
+            save_dir=epoch_visuals_save_dir,
+            show_plot=self.show_plot
+        )
         return
     
-    def _gather_tensors(self, low_imgs, outputs_list):
+    def _gather_tensors(self, low_imgs, outputs_list) -> tuple:
         """
         Gather tensors from the model outputs for Stage1 training.
         Args:
@@ -405,7 +431,20 @@ class Stage1Trainer(BaseTrainer):
         """
         return torch.randn(1, 2, 3, 64, 64, device=self.device)
     
-    def _log_gradient_stats(self):
+    def _log_gradient_stats(self)-> None:
+        """
+        Log gradient statistics for the model parameters to mlflow.
+        This includes the mean, min, and max of the gradients for each module (encoder, decomposer, decoder).
+        The statistics are logged with the prefix "grad/{module_name}/" where module_name is one of
+        "encoder", "decomposer", or "decoder".
+        The statistics are logged at the current epoch step.
+        If mlflow is not active, the statistics are not logged.
+
+        Args:
+            None
+        """
+
+
         stats = {}
         for name, module in (
             ("encoder",    self.model.encoder),
@@ -421,6 +460,46 @@ class Stage1Trainer(BaseTrainer):
                 stats[f"grad/{name}/mean"] = 0.0
                 stats[f"grad/{name}/min"]  = 0.0
                 stats[f"grad/{name}/max"]  = 0.0
-        # logging.info(f"epoch: {self.current_epoch}, Gradient stats\n{stats}")
+
         if mlflow.active_run():
             mlflow.log_metrics(stats, step=self.current_epoch)
+        else:
+            logging.debug("MLFlow is not active. Logging locally")
+            for name, val in stats.items():
+                logging.debug(f"{name}: {val:.4f}")
+
+    
+    @staticmethod
+    def _log_evaluation_metrics(metrics: dict, prefix: str = "val") -> None:
+        """
+        Log evaluation metrics to mlflow.
+        
+        Args:
+            metrics (dict): Dictionary of evaluation metrics.
+            prefix (str): Prefix for the metric names.
+        """
+        for name, val in metrics.items():
+            if name in Stage1Trainer.higher_is_better:
+                key = f"{prefix}/higher_is_better/{name}"
+            elif name in Stage1Trainer.lower_is_better:
+                key = f"{prefix}/lower_is_better/{name}"
+            else:
+                key = f"{prefix}/{name}"
+            mlflow.log_metric(key, float(val))
+
+    @staticmethod
+    def save_pytorch_model(model: nn.Module, path: str) -> None:
+        """
+        Save the PyTorch model to a file.
+        
+        Args:
+            model (nn.Module): The PyTorch model to save.
+            path (str): Path to save the model.
+        """
+        import traceback
+        try:
+            torch.save(model.state_dict(), path)
+            logging.info(f"Model saved to {path}")
+        except Exception as e:
+            logging.info(f"Failed to save model to {path} with error\n")
+            logging.info(f"{traceback.format_exc()}")

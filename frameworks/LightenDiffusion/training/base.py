@@ -173,7 +173,7 @@ class BaseTrainer(ABC):
             - metrics: A dictionary containing training and validation losses.
         """
         try:
-            prefix = "loss/"
+            prefix = "loss/train"
             num_bad = 0
             epoch_bar = TqdmManager(
                 total=self.num_epochs, 
@@ -191,10 +191,9 @@ class BaseTrainer(ABC):
                 self.train_losses.append(train_loss)
                 epoch_bar.set_postfix(train_loss=f"{train_loss:.4f}")
                 if mlflow.active_run():
-                    mlflow.log_metric(f"{prefix}total", train_loss, step=epoch)
+                    mlflow.log_metric(f"{prefix}/total", train_loss, step=epoch)
                     for key, value in loss_dict.items():
-                        if key != "total_loss":
-                            mlflow.log_metric(f"{prefix}{key}", value, step=epoch)
+                        mlflow.log_metric(f"{prefix}/{key}", value, step=epoch)
                 if epoch > 0 and epoch % self.val_frequency == 0:
                     val_loss = self.validate(epoch+1)
                     self.val_losses.append(val_loss)
@@ -205,7 +204,7 @@ class BaseTrainer(ABC):
                         break
                     if self.scheduler is not None:
                         logging.info(f"Step scheduler at epoch {epoch+1} with val_loss={val_loss:.4f}")
-                        self.scheduler.step(val_loss)
+                        self.scheduler.step()
                 epoch_bar.update(1)
             
             epoch_bar.close()
@@ -216,6 +215,8 @@ class BaseTrainer(ABC):
                 'best_loss': self.best_loss,
                 'best_epoch': self.best_epoch + 1
             }
+            self.metrics = metrics
+            self.after_training()
             return self.model, metrics
         except Exception as e:
             logging.error(f"An error occurred during training: {e}")
@@ -245,7 +246,7 @@ class BaseTrainer(ABC):
         else:
             num_bad += 1
             if num_bad >= self.patience:
-                logging.info(f"Early stopping at epoch {epoch+1} after {num_bad} epochs without improvement.")
+                logging.info(f"Early stopping at epoch {epoch+1} after {num_bad*self.val_frequency} epochs patience period.")
                 return True, num_bad
         return False, num_bad
 
