@@ -262,6 +262,11 @@ class Stage1Trainer(BaseTrainer):
             gradnorm_loss = self._gradnorm_step(raw_loss_ctdn, raw_loss_con)
             
             gradnorm_loss.backward()
+
+            if mlflow.active_run():
+                mlflow.log_metric("grad_w_con",  self.log_w_con.grad.abs().mean().item(), step=self.current_epoch)
+                mlflow.log_metric("grad_w_ctdn", self.log_w_ctdn.grad.abs().mean().item(), step=self.current_epoch)
+
             self._log_gradient_stats()
             self.optimizer.step()
 
