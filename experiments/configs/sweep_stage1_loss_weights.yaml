@@ -1,8 +1,8 @@
 base:
   experiment_name: "stage1_gradnorm_adaptive‐ctdn_sweep"
-  run_name: "GradNorm‑based adaptive loss weighting - Seperate Optimizers"
+  run_name: "Increase grad penalty"
   description: "Train Stage‑1 of LightenDiffusion with GradNorm‑learned global loss weights (content vs CTDN) while Bayesian‑sweeping the internal CTDN terms — weight_rec, weight_ref, weight_ill, and lambda_g — to discover the best decomposition balance without manual tuning."
-  num_epochs: 50
+  num_epochs: 30
   device: cuda
   dataset_name: "SICE_paired"
   dataset_id: "okhater/SICE"
@@ -11,10 +11,10 @@ base:
   learning_rate: 1e-5
   weight_decay: 1e-4
   patience: 5
-  val_frequency: 3
+  val_frequency: 5
   use_scheduler: true
   scheduler_gamma: 0.8
-  pretrain_content_ratio: .15
+  pretrain_content_ratio: .3
   pretrain_ctdn_ratio: .05
   local_save_directory: "/home/grads/o/omarkhater/projects/lle-generative-priors/experiments/artifacts"
   objective_metric: "psnr"
