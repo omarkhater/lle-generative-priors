@@ -121,12 +121,12 @@ class Stage1Trainer(BaseTrainer):
         self.num_epochs = num_epochs
         self.current_epoch = 0
 
-        self.log_w_con = nn.Parameter(torch.zeros(1, device=self.device))
+        self.log_w_con = nn.Parameter(torch.log(torch.tensor(2.0, device=self.device)))
         self.log_w_ctdn  = nn.Parameter(torch.zeros(1, device=self.device))
         self.optimizer.add_param_group(
             {
                 "params": [self.log_w_con, self.log_w_ctdn],
-                "lr": self.optimizer.param_groups[0]["lr"] * .1
+                "lr": self.optimizer.param_groups[0]["lr"] * .5
             }
         )
         self.L0_con = None
@@ -252,8 +252,15 @@ class Stage1Trainer(BaseTrainer):
             self._last_raw_con  = raw_loss_con.item()
             self._last_raw_ctdn = raw_loss_ctdn.item()
             self.optimizer.zero_grad()
-            gradnorm_loss = self._gradnorm_step(raw_loss_ctdn, raw_loss_con)
             loss_total.backward(retain_graph=True)
+
+            # kill any grad that just landed on the weights
+            for p in (self.log_w_con, self.log_w_ctdn):
+                if p.grad is not None:
+                    p.grad = None
+
+            gradnorm_loss = self._gradnorm_step(raw_loss_ctdn, raw_loss_con)
+            
             gradnorm_loss.backward()
             self._log_gradient_stats()
             self.optimizer.step()
@@ -555,6 +562,16 @@ class Stage1Trainer(BaseTrainer):
             self.L0_ctdn = raw_ctdn.detach().item()
             self.L0_con  = raw_con.detach().item()
 
+        # ── 1. get the *current* task weights ────────────────────────────
+        w_ctdn = torch.exp(self.log_w_ctdn)   # >0, trainable
+        w_con  = torch.exp(self.log_w_con)    
+
+        # ── 2. form *weighted* per‑task losses ───────────────────────────
+
+        loss_ctdn_w = w_ctdn * raw_ctdn
+        loss_con_w  = w_con  * raw_con
+
+        # ── 3. pick the params to balance (only those still requires_grad) ─
         shared_params = [p for p in self.model.parameters() if p.requires_grad]
 
         # helper: compute mean L1 norm of task gradients (with graph)
@@ -573,16 +590,26 @@ class Stage1Trainer(BaseTrainer):
             norms = torch.stack([g.abs().mean() for g in grads])
             return norms.mean()
 
-        g_ctdn = _grad_norm(raw_ctdn)
-        g_con  = _grad_norm(raw_con)
+        # ── 4. actually compute the norms on the *weighted* losses ────────
 
-        # ── 1. compute target norms (Eq. 3 in GradNorm paper) ────────────────
+        g_ctdn = _grad_norm(loss_ctdn_w)
+        g_con = torch.clamp(_grad_norm(loss_con_w), min=1e-6)
+        
+
+        # ── 5. compute the GradNorm targets ─────────────
         alpha  = self.gradnorm_alpha
-        r_ctdn = (raw_ctdn.detach() / self.L0_ctdn) ** alpha
-        r_con  = (raw_con.detach()  / self.L0_con)  ** alpha
+        r_ctdn = (raw_ctdn.detach() / self.L0_ctdn + 1e-8) ** alpha
+        r_con  = (raw_con.detach()  / self.L0_con + 1e-8)  ** alpha
         C      = (g_ctdn + g_con).detach() / 2.0
         target_ctdn, target_con = C * r_ctdn, C * r_con
 
-        # ── 2. GradNorm penalty
+        # ── 6. form the squared‑error penalty ────────────────────────────
         loss_gradnorm = (g_ctdn - target_ctdn).pow(2) + (g_con - target_con).pow(2)
+
+        if mlflow.active_run():
+            mlflow.log_metric("gradnorm_loss", loss_gradnorm.item(), step=self.current_epoch)
+            mlflow.log_metric("gradnorm/g_ctdn", g_ctdn.item(), step=self.current_epoch)
+            mlflow.log_metric("gradnorm/g_con", g_con.item(), step=self.current_epoch)
+            mlflow.log_metric("gradnorm/target_ctdn", target_ctdn.item(), step=self.current_epoch)
+            mlflow.log_metric("gradnorm/target_con", target_con.item(), step=self.current_epoch)
         return loss_gradnorm
