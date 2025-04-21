@@ -120,20 +120,18 @@ class Stage1Trainer(BaseTrainer):
             os.makedirs(self.save_dir, exist_ok=True)
         self.num_epochs = num_epochs
         self.current_epoch = 0
-
         self.log_w_con = nn.Parameter(torch.log(torch.tensor(2.0, device=self.device)))
         self.log_w_ctdn  = nn.Parameter(torch.zeros(1, device=self.device))
-        self.optimizer.add_param_group(
-            {
-                "params": [self.log_w_con, self.log_w_ctdn],
-                "lr": self.optimizer.param_groups[0]["lr"] * .5
-            }
-        )
         self.L0_con = None
         self.L0_ctdn = None
         self.gradnorm_alpha = gradnorm_alpha
         self.pretrain_content_ratio = pretrain_content_ratio
         self.pretrain_ctdn_ratio = pretrain_ctdn_ratio
+        self.weight_optimizer = torch.optim.Adam(
+            [self.log_w_con, self.log_w_ctdn],
+            lr=self.optimizer.param_groups[0]["lr"] * .5,
+            betas=(0.9, 0.999),
+        )
         self._validate_dimensions(train_loader, "train_loader")
         self._validate_dimensions(val_loader, "val_loader")
         self._validate_model_format()
@@ -251,25 +249,19 @@ class Stage1Trainer(BaseTrainer):
             loss_total, raw_loss_ctdn, raw_loss_con = self.calculate_loss(*loss_tensors)
             self._last_raw_con  = raw_loss_con.item()
             self._last_raw_ctdn = raw_loss_ctdn.item()
+
             self.optimizer.zero_grad()
+            self.weight_optimizer.zero_grad()
+
             loss_total.backward(retain_graph=True)
-
-            # kill any grad that just landed on the weights
-            for p in (self.log_w_con, self.log_w_ctdn):
-                if p.grad is not None:
-                    p.grad = None
-
             gradnorm_loss = self._gradnorm_step(raw_loss_ctdn, raw_loss_con)
-            
             gradnorm_loss.backward()
 
-            if mlflow.active_run():
-                mlflow.log_metric("grad_w_con",  self.log_w_con.grad.abs().mean().item(), step=self.current_epoch)
-                mlflow.log_metric("grad_w_ctdn", self.log_w_ctdn.grad.abs().mean().item(), step=self.current_epoch)
-
-            self._log_gradient_stats()
             self.optimizer.step()
-
+            self.weight_optimizer.step()
+            
+            self._log_gradient_stats()
+            
             running_loss += loss_total.item()
             running_ctdn_loss += raw_loss_ctdn.item()
             running_con_loss += raw_loss_con.item()
@@ -508,6 +500,8 @@ class Stage1Trainer(BaseTrainer):
         # ── Push to MLflow or console ───────────────────────────────────────────
         if mlflow.active_run():
             mlflow.log_metrics(stats, step=self.current_epoch)
+            mlflow.log_metric("grad_w_con",  self.log_w_con.grad.abs().mean().item(), step=self.current_epoch)
+            mlflow.log_metric("grad_w_ctdn", self.log_w_ctdn.grad.abs().mean().item(), step=self.current_epoch)
         else:
             for k, v in stats.items():
                 logging.debug(f"{k}: {v:.4f}")
