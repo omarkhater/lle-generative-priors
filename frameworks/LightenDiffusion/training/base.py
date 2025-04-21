@@ -131,6 +131,13 @@ class BaseTrainer(ABC):
         if not isinstance(patience, int) or patience <= 0:
             raise ValueError("patience must be a positive integer")
         
+        if val_frequency > num_epochs:
+            self.val_frequency = num_epochs - 1
+            logging.warning(
+                f"val_frequency ({val_frequency}) is greater than num_epochs ({num_epochs}). "
+                f"Setting val_frequency to {self.val_frequency}."
+            )
+        
 
     @abstractmethod
     def train_epoch(self) -> float:
@@ -204,7 +211,9 @@ class BaseTrainer(ABC):
                         break
                     if self.scheduler is not None:
                         logging.info(f"Step scheduler at epoch {epoch+1} with val_loss={val_loss:.4f}")
-                        self.scheduler.step()
+                        self.scheduler.step(val_loss)
+                else:
+                    self.all_val_metrics.append([]) # Enable access all validation metrics by best epoch index
                 epoch_bar.update(1)
             
             epoch_bar.close()
@@ -213,7 +222,7 @@ class BaseTrainer(ABC):
                 'train_losses': self.train_losses,
                 'val_losses': self.val_losses,
                 'best_loss': self.best_loss,
-                'best_epoch': self.best_epoch + 1
+                'best_epoch': self.best_epoch 
             }
             self.metrics = metrics
             self.after_training()

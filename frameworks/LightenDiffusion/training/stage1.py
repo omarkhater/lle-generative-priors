@@ -55,7 +55,6 @@ class Stage1Trainer(BaseTrainer):
         num_epochs: int = 100,
         val_frequency: int = 5,
         patience: int = 5,
-        weight_cont: float = 0.1,
         weight_rec: float = 1.0,
         weight_ref: float = 0.1,
         weight_ill: float = 0.1,
@@ -66,6 +65,7 @@ class Stage1Trainer(BaseTrainer):
         random_seed: int = 42,
         show_plot: bool = True,
         save_dir: str = None,
+        gradnorm_alpha: float = 1.5,
 
     ) -> None:
         """
@@ -80,17 +80,16 @@ class Stage1Trainer(BaseTrainer):
             val_frequency (int): Run validation every N epochs.
             patience (int): Early-stopping patience.
             weight_rec (float): Weight for reconstruction term in ctdn_loss.
-            weight_cont (float): Weight for content loss.
             weight_ref (float): Weight for reflectance-consistency term in ctdn_loss.
             weight_ill (float): Weight for illumination-smoothness term in ctdn_loss.
             lambda_g (float): Exponential weighting factor for gradient in ctdn_loss.
-            pretrain_content_ratio: Fraction of total epochs to train with content-only.
-            pretrain_ctdn_ratio: Fraction of total epochs to train with CTDN-only.
             num_visualizations (int): Number of samples to visualize during validation.
             random_seed (int): Seed for random selection of samples.
             show_plot (bool): Whether to show the plots when validating the model
-            save_dir (str, optional): Directory to save training artifcats (visuals+models) if provided.
-            
+            save_dir (str, optional): Base Local Directory to save training artifcats (visuals+models) if provided.
+            gradnorm_alpha (float): Exponent for GradNorm balancing.
+            pretrain_content_ratio (float): Ratio of epochs to pretrain content loss.
+            pretrain_ctdn_ratio (float): Ratio of epochs to pretrain ctdn loss.
         """
         super().__init__(
             model, 
@@ -106,7 +105,6 @@ class Stage1Trainer(BaseTrainer):
         self.weight_rec = weight_rec
         self.weight_ref = weight_ref
         self.weight_ill = weight_ill
-        self.weight_cont = weight_cont
         self.lambda_g = lambda_g
         self.best_loss = float('inf')
         self.best_epoch = 0
@@ -116,25 +114,31 @@ class Stage1Trainer(BaseTrainer):
         self.num_visualizations = num_visualizations
         self.random_seed = random_seed
         self.all_val_metrics = []
-        self.pretrain_content_ratio = pretrain_content_ratio
-        self.pretrain_ctdn_ratio = pretrain_ctdn_ratio
         self.show_plot = show_plot
         self.save_dir = save_dir
         if self.save_dir and not os.path.exists(self.save_dir):
             os.makedirs(self.save_dir, exist_ok=True)
         self.num_epochs = num_epochs
-
-        self._final_weights = {
-            'cont': weight_cont,
-            'rec': weight_rec,
-            'ref': weight_ref,
-            'ill': weight_ill
-        }
         self.current_epoch = 0
-
+        self.log_w_con = nn.Parameter(torch.log(torch.tensor(2.0, device=self.device)))
+        self.log_w_ctdn  = nn.Parameter(torch.zeros(1, device=self.device))
+        self.L0_con = None
+        self.L0_ctdn = None
+        self.gradnorm_alpha = gradnorm_alpha
+        self.pretrain_content_ratio = pretrain_content_ratio
+        self.pretrain_ctdn_ratio = pretrain_ctdn_ratio
+        self.weight_optimizer = torch.optim.Adam(
+            [self.log_w_con, self.log_w_ctdn],
+            lr=self.optimizer.param_groups[0]["lr"] * .5,
+            betas=(0.9, 0.999),
+        )
         self._validate_dimensions(train_loader, "train_loader")
         self._validate_dimensions(val_loader, "val_loader")
         self._validate_model_format()
+    
+    def _freeze_module(self, module: nn.Module, freeze: bool) -> None:
+        for p in module.parameters():
+            p.requires_grad = not freeze
         
     def _validate_dimensions(self, loader: DataLoader, loader_name: str) -> None:
         """
@@ -177,9 +181,8 @@ class Stage1Trainer(BaseTrainer):
             encoded_features: torch.Tensor
         ) -> tuple:
         """
-        Calculate the loss for Stage1:
-        1) ctdn_loss: cross reconstruction + reflectance consistency + illumination smoothness
-        2) content_loss: perceptual loss between reconstructions and low_imgs
+        Calculate the total loss for Stage1 training.
+
 
         Args:
             low_imgs (torch.Tensor): Low-light images of shape [B, m, 3, H, W].
@@ -188,7 +191,9 @@ class Stage1Trainer(BaseTrainer):
             reconstructions (torch.Tensor): Decoder reconstructions of shape [B, m, 3, H/2^k, 2^k].
             encoded_features (torch.Tensor): Encoded features of shape [B, m, C, H/2^k, W/2^k].
         Returns:
-            tuple: Total loss, ctdn_loss, and content_loss.
+            tuple: 
+            loss_total, raw_ctdn_loss, raw_content_loss
+            (scaling is applied inside `loss_total` via learned GradNorm weights)
         """
         loss_ctdn = ctdn_loss(
                 reflectances, 
@@ -203,7 +208,10 @@ class Stage1Trainer(BaseTrainer):
             reconstructions,
             low_imgs
         )
-        loss_total = loss_ctdn + self.weight_cont * loss_con
+        w_ctdn = torch.exp(self.log_w_ctdn)
+        w_con  = torch.exp(self.log_w_con)
+
+        loss_total = w_ctdn * loss_ctdn + w_con * loss_con
 
         return loss_total, loss_ctdn, loss_con
 
@@ -211,7 +219,8 @@ class Stage1Trainer(BaseTrainer):
     @with_curriculum
     def train_epoch(self) -> dict:
         """
-        Train for one epoch in unsupervised Stage1:
+        Train for one epoch with integrated GradNorm balancing.
+
           1) Forward pass: model(low_imgs) => list of dictionaries [ {R, L}, {R, L}, ... ]
           2) Stack reflectances/illuminations => [B, m, C, H, W]
           3) ctdn_loss(...) => cross reconstruction + reflectance consistency + illumination smoothness
@@ -225,6 +234,7 @@ class Stage1Trainer(BaseTrainer):
         """
         self.model.train()
         running_loss = running_ctdn_loss = running_con_loss = 0.0
+        self._last_raw_con = self._last_raw_ctdn = None
         self.current_epoch += 1
         batch_bar = TqdmManager(
             total=len(self.train_loader), 
@@ -235,71 +245,90 @@ class Stage1Trainer(BaseTrainer):
         for i, (low_imgs, _) in enumerate(self.train_loader):
             low_imgs = low_imgs.to(self.device)  
             outputs_list = self.model(low_imgs)
-            loss_tesnors = self._gather_tensors(low_imgs, outputs_list)
-            loss_total, loss_ctdn, loss_con = self.calculate_loss(*loss_tesnors)
-            self.optimizer.zero_grad()
-            loss_total.backward()
-            self._log_gradient_stats()
-            self.optimizer.step()
+            loss_tensors = self._gather_tensors(low_imgs, outputs_list)
+            loss_total, raw_loss_ctdn, raw_loss_con = self.calculate_loss(*loss_tensors)
+            self._last_raw_con  = raw_loss_con.item()
+            self._last_raw_ctdn = raw_loss_ctdn.item()
 
+            self.optimizer.zero_grad()
+            self.weight_optimizer.zero_grad()
+
+            loss_total.backward(retain_graph=True)
+            gradnorm_loss = self._gradnorm_step(raw_loss_ctdn, raw_loss_con)
+            gradnorm_loss.backward()
+
+            self.optimizer.step()
+            self.weight_optimizer.step()
+            
+            self._log_gradient_stats()
+            
             running_loss += loss_total.item()
-            running_ctdn_loss += loss_ctdn.item()
-            running_con_loss += loss_con.item()
+            running_ctdn_loss += raw_loss_ctdn.item()
+            running_con_loss += raw_loss_con.item()
 
             avg_total_loss = running_loss / (i + 1)
             avg_ctdn_loss = running_ctdn_loss / (i + 1)
             avg_con_loss = running_con_loss / (i + 1)
-            weighted_loss_content = self.weight_cont * avg_con_loss
 
-
+            scaled_con  = torch.exp(self.log_w_con).item()  * avg_con_loss
+            scaled_ctdn = torch.exp(self.log_w_ctdn).item() * avg_ctdn_loss
 
             batch_bar.set_postfix(
-                    total_loss=f"{avg_total_loss:.4f}",
-                    weighted_content_loss=f"{weighted_loss_content:.4f}", 
-                    ctdn_loss=f"{avg_ctdn_loss:.4f}"
-                )  
+                total_loss       = f"{avg_total_loss:.4f}",
+                scaled_con_loss  = f"{scaled_con:.4f}",
+                scaled_ctdn_loss = f"{scaled_ctdn:.4f}"
+            )
+
             batch_bar.update(1)
     
         batch_bar.close()
 
         return {
             'total_loss': avg_total_loss,
-            'weighted_content_loss': weighted_loss_content,
-            'ctdn_loss': avg_ctdn_loss,
+            'scaled_con_loss': scaled_con,
+            'scaled_ctdn_loss': scaled_ctdn,
         }
 
-    def _apply_curriculum(self, epoch_number: int) -> None:
+    def _apply_curriculum(self, epoch: int) -> None:
         """
-        Adjust loss weights & parameter freezing based on epoch fraction. 
-        
-        Args:
-            epoch_number (int): Current epoch number.
-
+        *Phase 1*  (0 → t1): warm‑up Encoder+Decoder with a **linear ramp**
+        *Phase 2*  (t1 → t2): train CTDN only, again linearly ramping its loss weights
+        *Phase 3*  ( ≥ t2):   joint fine‑tune; progressively un‑freeze encoder blocks
         """
+        # --- phase boundaries ----------------------------------------------------
+        T   = self.num_epochs
+        t1  = int(self.pretrain_content_ratio * T)                
+        t2  = int((self.pretrain_content_ratio + self.pretrain_ctdn_ratio) * T)
+        logging.info(f"Training Encoder + Decoder only up to epoch {t1}")
+        logging.info(f"Training CTDN only up to epoch {t2}")
+        logging.info(f"Fine-tuning Encoder + Decoder + CTDN after epoch {t2} - {self.num_epochs}")
 
-        content_threshold = int(self.num_epochs * self.pretrain_content_ratio)
-        ctdn_threshold = int(self.num_epochs * self.pretrain_ctdn_ratio) + content_threshold
-        if epoch_number < content_threshold:
-            logging.info(f"[📚] Curriculum: Training with content loss only until epoch {content_threshold}")
-            self.weight_rec = self.weight_ref = self.weight_ill = 0.0
-            for p in self.model.encoder.parameters(): p.requires_grad = True
-            for p in self.model.decoder.parameters(): p.requires_grad = True
-        
-        elif epoch_number < ctdn_threshold:
-            logging.info(f"[📚] Curriculum: Training with CTDN loss only until epoch {ctdn_threshold}")
-   
-            self.weight_rec = self._final_weights['rec']
-            self.weight_ref = self._final_weights['ref']
-            self.weight_ill = self._final_weights['ill']
-            for p in self.model.encoder.parameters(): p.requires_grad = False
-            for p in self.model.decoder.parameters(): p.requires_grad = False
+        if epoch < t1:
+
+            self._freeze_module(self.model.encoder,   False)
+            self._freeze_module(self.model.decoder,   False)
+            self._freeze_module(self.model.decomposer, True)
+
+        # ----------------------- PHASE 2 : CTDN only -----------------------------
+        elif epoch < t2:
+
+            self._freeze_module(self.model.encoder,   True)
+            self._freeze_module(self.model.decoder,   True)
+            self._freeze_module(self.model.decomposer,False)
+
+        # ----------------------- PHASE 3 : Joint fine‑tune -----------------------
         else:
-            logging.info(f"[📚] Curriculum: Training with full loss after epoch {ctdn_threshold}")
-            for p in self.model.parameters(): p.requires_grad = True
-            self.weight_cont = self._final_weights['cont']
-            self.weight_rec  = self._final_weights['rec']
-            self.weight_ref  = self._final_weights['ref']
-            self.weight_ill  = self._final_weights['ill']
+
+            # progressive un‑freezing of encoder blocks
+            unfreeze_gap = 3                              # epochs between unfreezes
+            blocks       = list(self.model.encoder.children())
+            n_unfreeze   = min(len(blocks),
+                            1 + (epoch - t2) // unfreeze_gap)
+            for i, block in enumerate(blocks):
+                self._freeze_module(block, freeze=(i >= n_unfreeze))
+            self._freeze_module(self.model.decoder,   False)
+            self._freeze_module(self.model.decomposer,False)
+
 
     def validate_batch(self, batch: tuple) -> float:
         """
@@ -334,7 +363,7 @@ class Stage1Trainer(BaseTrainer):
         local_path = f"{self.save_dir}/model/best_model.pth" if self.save_dir else None
         self.save_pytorch_model(self.best_state, local_path)
         if mlflow.active_run():
-            mlflow.log_artifact(local_path, self.best_state)
+            mlflow.log_artifact(local_path )
             mlflow.log_metric("best_val_loss", self.best_loss)
             mlflow.log_metric("best_val_epoch", self.best_epoch)
             mlflow.pytorch.log_model(self.model, "model")
@@ -431,42 +460,51 @@ class Stage1Trainer(BaseTrainer):
         """
         return torch.randn(1, 2, 3, 64, 64, device=self.device)
     
-    def _log_gradient_stats(self)-> None:
+    def _log_gradient_stats(self) -> None:
         """
-        Log gradient statistics for the model parameters to mlflow.
-        This includes the mean, min, and max of the gradients for each module (encoder, decomposer, decoder).
-        The statistics are logged with the prefix "grad/{module_name}/" where module_name is one of
-        "encoder", "decomposer", or "decoder".
-        The statistics are logged at the current epoch step.
-        If mlflow is not active, the statistics are not logged.
+        Collect and log gradient statistics + current GradNorm weights.
 
-        Args:
-            None
+        For each sub‑module (encoder, decomposer, decoder) we record:
+        • mean |grad|   • min |grad|   • max |grad|
+
+        We also record the *learned* task weights and their product with the
+        current batch’s raw losses (if they were stashed on the trainer as
+        `self._last_raw_con` / `self._last_raw_ctdn` in train_epoch).
+
+        MLflow step index = self.current_epoch.
         """
-
 
         stats = {}
+        # ── per‑module grad norms ────────────────────────────────────────────────
         for name, module in (
             ("encoder",    self.model.encoder),
             ("decomposer", self.model.decomposer),
             ("decoder",    self.model.decoder),
         ):
-            norms = [p.grad.norm().item() for p in module.parameters() if p.grad is not None]
-            if norms:
-                stats[f"grad/{name}/mean"] = float(np.mean(norms))
-                stats[f"grad/{name}/min"]  = float(np.min(norms))
-                stats[f"grad/{name}/max"]  = float(np.max(norms))
-            else:
-                stats[f"grad/{name}/mean"] = 0.0
-                stats[f"grad/{name}/min"]  = 0.0
-                stats[f"grad/{name}/max"]  = 0.0
+            norms = [p.grad.norm().item() for p in module.parameters()
+                    if p.grad is not None]
+            stats[f"grad/{name}/mean"] = float(np.mean(norms)) if norms else 0.0
+            stats[f"grad/{name}/min"]  = float(np.min(norms)) if norms else 0.0
+            stats[f"grad/{name}/max"]  = float(np.max(norms)) if norms else 0.0
 
+        # ── GradNorm weights (always useful) ────────────────────────────────────
+        w_con  = float(torch.exp(self.log_w_con ).item())
+        w_ctdn = float(torch.exp(self.log_w_ctdn).item())
+        stats.update({"w_con": w_con, "w_ctdn": w_ctdn})
+
+        # ── Optionally log *scaled* losses if train_epoch cached them ───────────
+        if hasattr(self, "_last_raw_con") and hasattr(self, "_last_raw_ctdn"):
+            stats["scaled_con"]  = w_con  * float(self._last_raw_con)
+            stats["scaled_ctdn"] = w_ctdn * float(self._last_raw_ctdn)
+
+        # ── Push to MLflow or console ───────────────────────────────────────────
         if mlflow.active_run():
             mlflow.log_metrics(stats, step=self.current_epoch)
+            mlflow.log_metric("grad_w_con",  self.log_w_con.grad.abs().mean().item(), step=self.current_epoch)
+            mlflow.log_metric("grad_w_ctdn", self.log_w_ctdn.grad.abs().mean().item(), step=self.current_epoch)
         else:
-            logging.debug("MLFlow is not active. Logging locally")
-            for name, val in stats.items():
-                logging.debug(f"{name}: {val:.4f}")
+            for k, v in stats.items():
+                logging.debug(f"{k}: {v:.4f}")
 
     
     @staticmethod
@@ -498,8 +536,79 @@ class Stage1Trainer(BaseTrainer):
         """
         import traceback
         try:
-            torch.save(model.state_dict(), path)
+            if not os.path.exists(os.path.dirname(path)):
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+            torch.save(model, path)
             logging.info(f"Model saved to {path}")
         except Exception as e:
             logging.info(f"Failed to save model to {path} with error\n")
             logging.info(f"{traceback.format_exc()}")
+
+    def _gradnorm_step(self, raw_ctdn: torch.Tensor, raw_con: torch.Tensor):
+        """
+        One gradient‑balancing step (GradNorm) applied *after*
+        back‑propagating loss_total and *before* optimiser.step().
+
+        Args:
+            raw_ctdn (torch.Tensor): Raw CTDN loss.
+            raw_con (torch.Tensor): Raw content loss.
+        
+        Returns:
+            None
+        """
+        # ── 0. bootstrap the reference losses ────────────────────────────────
+        if self.L0_ctdn is None:          # happens only in the very first call
+            self.L0_ctdn = raw_ctdn.detach().item()
+            self.L0_con  = raw_con.detach().item()
+
+        # ── 1. get the *current* task weights ────────────────────────────
+        w_ctdn = torch.exp(self.log_w_ctdn)   # >0, trainable
+        w_con  = torch.exp(self.log_w_con)    
+
+        # ── 2. form *weighted* per‑task losses ───────────────────────────
+
+        loss_ctdn_w = w_ctdn * raw_ctdn
+        loss_con_w  = w_con  * raw_con
+
+        # ── 3. pick the params to balance (only those still requires_grad) ─
+        shared_params = [p for p in self.model.parameters() if p.requires_grad]
+
+        # helper: compute mean L1 norm of task gradients (with graph)
+        def _grad_norm(loss: torch.Tensor) -> torch.Tensor:
+            grads = torch.autograd.grad(
+                loss, 
+                shared_params,
+                retain_graph=True,
+                create_graph=True,
+                allow_unused=True,
+                grad_outputs=[torch.ones_like(loss)]
+            )
+            grads = [g for g in grads if g is not None]
+            if not grads:
+                return torch.tensor(0.0, device=self.device)
+            norms = torch.stack([g.abs().mean() for g in grads])
+            return norms.mean()
+
+        # ── 4. actually compute the norms on the *weighted* losses ────────
+
+        g_ctdn = _grad_norm(loss_ctdn_w)
+        g_con = torch.clamp(_grad_norm(loss_con_w), min=1e-6)
+        
+
+        # ── 5. compute the GradNorm targets ─────────────
+        alpha  = self.gradnorm_alpha
+        r_ctdn = (raw_ctdn.detach() / self.L0_ctdn + 1e-8) ** alpha
+        r_con  = (raw_con.detach()  / self.L0_con + 1e-8)  ** alpha
+        C      = (g_ctdn + g_con).detach() / 2.0
+        target_ctdn, target_con = C * r_ctdn, C * r_con
+
+        # ── 6. form the squared‑error penalty ────────────────────────────
+        loss_gradnorm = (g_ctdn - target_ctdn).pow(2) + (g_con - target_con).pow(2)
+
+        if mlflow.active_run():
+            mlflow.log_metric("gradnorm_loss", loss_gradnorm.item(), step=self.current_epoch)
+            mlflow.log_metric("gradnorm/g_ctdn", g_ctdn.item(), step=self.current_epoch)
+            mlflow.log_metric("gradnorm/g_con", g_con.item(), step=self.current_epoch)
+            mlflow.log_metric("gradnorm/target_ctdn", target_ctdn.item(), step=self.current_epoch)
+            mlflow.log_metric("gradnorm/target_con", target_con.item(), step=self.current_epoch)
+        return loss_gradnorm
