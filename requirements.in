@@ -11,3 +11,4 @@ python-dotenv
 boto3
 optuna
 plotly
+kaleido
