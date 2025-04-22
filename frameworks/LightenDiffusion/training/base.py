@@ -71,6 +71,7 @@ class BaseTrainer(ABC):
         num_epochs: int = 100,
         val_frequency: int = 5,
         patience: int = 5,
+        curriculum_keys: Optional[List[str]] = None,
     ):
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -86,6 +87,8 @@ class BaseTrainer(ABC):
         self.best_state = copy.deepcopy(self.model.state_dict())
         self.train_losses: List[float] = []
         self.val_losses: List[float] = []
+        self.curriculum_keys = curriculum_keys if curriculum_keys is not None else []
+        self._val_raws: Dict[str, List[float]] = {}
         self._validate_inputs(
             model, train_loader, val_loader, optimizer, device,
             scheduler, num_epochs, val_frequency, patience
@@ -148,7 +151,7 @@ class BaseTrainer(ABC):
         pass
     
     @abstractmethod
-    def validate_batch(self, batch: Tuple[torch.Tensor, torch.Tensor]) -> float:
+    def validate_batch(self, batch: Tuple[torch.Tensor, torch.Tensor]) -> Dict[str, Any]:
         """
         Validate a batch of data.
         Must be implemented by the inherited class.
@@ -270,13 +273,31 @@ class BaseTrainer(ABC):
         """
         self.model.eval()
         running_loss = 0.0
+        self._val_raws = {k: [] for k in self.curriculum_keys}
         
         with torch.no_grad():
             for batch_data in self.val_loader:
                 batch_data = self.ensure_on_device(batch_data)
-                loss = self.validate_batch(batch_data)
+                losses = self.validate_batch(batch_data)
+                loss = losses.get("total_loss")
+                if loss is None:
+                    raise ValueError("Validation loss not found in losses. Does validate_batch return a key = total_loss?")
                 running_loss += loss if isinstance(loss, float) else loss.item()
+
+                raw_losses = losses.get("raw_losses")
+                if raw_losses is None:
+                    raise ValueError("Validation raw losses not found in losses. Does validate_batch return a key = raw_losses?")
+                
+                for key, value in self._val_raws.items():
+                    if key in raw_losses:
+                        self._val_raws[key].append(raw_losses[key].item())
+                    else:
+                        raise ValueError(f"Key {key} not found in raw_losses. Does calculate_loss return a key = {key} under raw_losses?")
         
+        self._avg_val_raws = {
+        key: (sum(vals) / len(vals) if vals else float("nan"))
+        for key, vals in self._val_raws.items()
+        }
         self.after_validation(current_epoch)
         
         self.model.train()

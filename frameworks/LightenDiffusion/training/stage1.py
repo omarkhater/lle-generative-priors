@@ -19,7 +19,7 @@ from frameworks.LightenDiffusion.models.stage1 import Stage1
 import mlflow
 import numpy as np
 from typing import Dict, Tuple, Any
-
+import functools
 LOSS_REGISTRY = {
     "content": {
         "fn": content_loss,
@@ -58,16 +58,18 @@ def with_curriculum(fn):
     """
         Decorator to apply curriculum learning before each training epoch.
     """
-    def wrapper(self, epoch_number: int = None) -> dict:
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs) -> dict:
         """
-        Apply curriculum learning before each training epoch.
+        Apply curriculum learning before training or validation.
+
         Args:
-            epoch_number (int): Current epoch number.
-        Returns:
-            dict: Dictionary containing average total loss, weighted content loss, and ctdn loss.
+            fn: The function to be wrapped.
+            *args: Positional arguments for the wrapped function.
+            **kwargs: Keyword arguments for the wrapped function.
         """
         self._apply_curriculum(self.current_epoch)
-        return fn(self)
+        return fn(self, *args, **kwargs)
     return wrapper
 
 class Stage1Trainer(BaseTrainer):
@@ -95,14 +97,15 @@ class Stage1Trainer(BaseTrainer):
         num_epochs: int = 100,
         val_frequency: int = 5,
         patience: int = 5,
-        pretrain_content_ratio: float = .05, 
-        pretrain_ctdn_ratio: float = .1,
         num_visualizations: int = 1,
         random_seed: int = 42,
         show_plot: bool = True,
         save_dir: str = None,
         gradnorm_alpha: float = 1.5,
         gradnorm_interval: int = 3,
+        content_patience: int = 5,
+        ctdn_ramp_length: int = 5,
+        curriculum_keys: List[str] = ["content"]
 
     ) -> None:
         """
@@ -121,9 +124,10 @@ class Stage1Trainer(BaseTrainer):
             show_plot (bool): Whether to show the plots when validating the model
             save_dir (str, optional): Base Local Directory to save training artifcats (visuals+models) if provided.
             gradnorm_alpha (float): Exponent for GradNorm balancing.
-            pretrain_content_ratio (float): Ratio of epochs to pretrain content loss.
-            pretrain_ctdn_ratio (float): Ratio of epochs to pretrain ctdn loss.
             gradnorm_interval (int): Interval for computing GradNorm updates.
+            content_patience (int): How many val epochs to wait in plateau-based triggering.
+            ctdn_ramp_length (int): How many epochs to ramp up the CTDN loss weights.
+            curriculum_keys (List[str]): List of keys to apply curriculum learning.
         """
         super().__init__(
             model, 
@@ -135,6 +139,7 @@ class Stage1Trainer(BaseTrainer):
             num_epochs, 
             val_frequency, 
             patience, 
+            curriculum_keys
         )
         self.best_loss = float('inf')
         self.best_epoch = 0
@@ -156,8 +161,6 @@ class Stage1Trainer(BaseTrainer):
         })
         self.initial_raw_losses  = {name: None for name in LOSS_REGISTRY}
         self.gradnorm_alpha = gradnorm_alpha
-        self.pretrain_content_ratio = pretrain_content_ratio
-        self.pretrain_ctdn_ratio = pretrain_ctdn_ratio
         self.weight_optimizer = torch.optim.Adam(
             self.log_weights.values(),
             lr=self.optimizer.param_groups[0]["lr"] * .5,
@@ -165,6 +168,15 @@ class Stage1Trainer(BaseTrainer):
         )
         self.gradnorm_interval = gradnorm_interval
         self._batch_counter = 0
+        self.content_patience = content_patience
+        self.best_content_loss = float('inf')
+        self.content_plateau_cnt = 0
+
+        self.ctdn_ramp_length = ctdn_ramp_length
+        self.ramp_started = False
+        self.ramp_epoch = None
+        self.val_content_losses = []
+        self.curriculum_keys = curriculum_keys or []
         self._validate_dimensions(train_loader, "train_loader")
         self._validate_dimensions(val_loader, "val_loader")
         self._validate_model_format()
@@ -423,48 +435,29 @@ class Stage1Trainer(BaseTrainer):
 
     def _apply_curriculum(self, epoch: int) -> None:
         """
-        Soft curriculum via linear ramps on the log‐weights.
-
-        We define two phase boundaries:
-          t1 = pretrain_content_ratio  ⋅ num_epochs
-          t2 = (pretrain_content_ratio + pretrain_ctdn_ratio) ⋅ num_epochs
-
-        • Phase 1 (0 ≤ epoch < t1):
-            content weight ramps from 0 → 1  
-            CTDN sub‐loss weights stay at 0  
-        • Phase 2 (t1 ≤ epoch < t2):
-            content weight = 1  
-            CTDN sub‐loss weights ramp from 0 → 1  
-        • Phase 3 (epoch ≥ t2):
-            all weights = 1  (and thereafter GradNorm is free to adapt)
-
+        Adaptive curriculum:
+          - Before plateau: content weight = 1, CTDN weights = 0
+          - After plateau trigger: over `ctdn_ramp_length` epochs, CTDN weights ramp 0→1
+          - Thereafter: all weights = 1, GradNorm free to adapt.
         Args:
-            epoch: zero‐based index of the current epoch.
+            epoch (int): Current epoch number.
+        
+        Returns:
+            None
         """
-        T  = self.num_epochs
-        t1 = int(self.pretrain_content_ratio * T)
-        t2 = int((self.pretrain_content_ratio + self.pretrain_ctdn_ratio) * T)
-
-        if t1 > 0:
-            content_scale = min(1.0, epoch / t1)
-        else:
-            content_scale = 1.0
-
-        if epoch < t1 or t2 <= t1:
-            ctdn_scale = 0.0
-        else:
-            ctdn_scale = min(1.0, (epoch - t1) / (t2 - t1))
-
         eps = 1e-8
-        self.log_weights['content'].data.fill_(
-            np.log(content_scale + eps)
-        )
+        self.log_weights['content'].data.fill_(0.0) 
+        if not self.ramp_started:
+            fill = np.log(eps)            
+        else:
+            it = epoch - self.ramp_epoch
+            frac = min(1.0, max(0.0, it / self.ctdn_ramp_length))
+            fill = np.log(frac + eps)
+
         for name in ('reconstruction',
                      'reflectance_consistency',
                      'illumination_smoothness'):
-            self.log_weights[name].data.fill_(
-                np.log(ctdn_scale + eps)
-            )
+            self.log_weights[name].data.fill_(fill)
 
     def validate_batch(self, batch: tuple) -> float:
         """
@@ -481,8 +474,14 @@ class Stage1Trainer(BaseTrainer):
         low_imgs = low_imgs.to(self.device)
         outputs_list = self.model(low_imgs)
         loss_tensors = self._gather_tensors(low_imgs, outputs_list)
-        loss_total, _, _ = self.calculate_loss(*loss_tensors)
-        return loss_total
+        loss_total, raw_losses , weighted_losses = self.calculate_loss(*loss_tensors)
+
+        losses = {
+            "total_loss": loss_total, 
+            "raw_losses": raw_losses,
+            "weighted_losses": weighted_losses
+        }
+        return losses
 
     
     def after_training(self) -> None:
@@ -505,17 +504,24 @@ class Stage1Trainer(BaseTrainer):
             mlflow.pytorch.log_model(self.model, "model")
         return 
     
+    @with_curriculum
     def after_validation(self, epoch: int) -> None:
         """
-        Save the best model and log metrics to mlflow.
-
+        High‑level evaluation + adaptive curriculum trigger
         Args:
             epoch (int): Current epoch number.
 
         """
+        # 1) standard image‐based metrics (PSNR/SSIM/…)
         val_metrics = evaluate_stage1_metrics_individual(self.model, self.val_loader)
         self.all_val_metrics.append(val_metrics)
         self._log_evaluation_metrics(val_metrics, prefix="val")
+
+        # 2) plateau detection on *content* loss and possibly start CTDN ramp
+        avg_content = self._avg_val_raws.get("content", float("nan"))
+        self.val_content_losses.append(avg_content)
+        self._maybe_trigger_ctdn_ramp(avg_content)
+        # 3) Visuals
         epoch_visuals_save_dir = f"{self.save_dir}/epoch_{epoch}" if self.save_dir else None
         visualize_stage1_results(
             self.model, 
@@ -734,4 +740,24 @@ class Stage1Trainer(BaseTrainer):
                 mlflow.log_metric(f"gradnorm/target_{name}", targets[name].item(), step=self.current_epoch)
                 mlflow.log_metric(f"gradnorm/g_{name}", grads[name].item(), step=self.current_epoch)
         return loss_gradnorm 
+
     
+    def _maybe_trigger_ctdn_ramp(self, avg_content: float) -> None:
+        """
+        Plateau‐based trigger for starting CTDN ramp:
+          • Reset plateau counter on improvement.
+          • Increment otherwise.
+          • When plateau ≥ content_patience, flip ramp_started and record ramp_epoch.
+        """
+        # did content improve?
+        if avg_content < self.best_content_loss:
+            self.best_content_loss = avg_content
+            self.content_plateau_cnt = 0
+        else:
+            self.content_plateau_cnt += 1
+
+        # start ramp once patience is exceeded
+        if not self.ramp_started and self.content_plateau_cnt >= self.content_patience:
+            self.ramp_started = True
+            self.ramp_epoch   = self.current_epoch
+
