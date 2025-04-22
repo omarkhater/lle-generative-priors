@@ -51,62 +51,71 @@ class CustomDataset(Dataset):
         ])
         self.samples = self._prepare_samples()
 
-    def _prepare_samples(self) -> List[Dict]:
-        groups = self._group_by_sample()
-        samples = []
-        for _, items in groups.items():
-            low_imgs, label_img = self._separate_sample(items)
-            if label_img is not None and low_imgs:
-                samples.append({
-                    "low_images": low_imgs,
-                    "label": label_img,
-                })
+    def _prepare_samples(self) -> List[Dict[str, List[int]]]:
+        samples: List[Dict[str, List[int]]] = []
+        for indices in self._group_by_sample().values():
+            low_idxs, lbl_idx = self._separate_sample(indices)
+            if lbl_idx is not None and low_idxs:
+                samples.append({"low_idxs": low_idxs, "label_idx": lbl_idx})
         return samples
 
-    def _group_by_sample(self) -> Dict[str, List[Dict]]:
-        groups: Dict[str, List[Dict]] = {}
-        for item in self.hf_dataset:
-            sample_id = item["label"]  # Using the "label" field as the sample identifier.
-            groups.setdefault(sample_id, []).append(item)
+    def _group_by_sample(self) -> Dict[str, List[int]]:
+        groups: Dict[str, List[int]] = {}
+        for idx, record in enumerate(self.hf_dataset):
+            sample_id = record["label"]
+            groups.setdefault(sample_id, []).append(idx)
         return groups
 
-    def _separate_sample(self, items: List[Dict]) -> Tuple[List[Image.Image], Image.Image]:
-        low_images: List[Image.Image] = []
-        label_image: Image.Image | None = None
-        for record in items:
-            image_obj = record["image"]
-            if not isinstance(image_obj, Image.Image):
-                image_obj = Image.fromarray(image_obj)
-            filename = getattr(image_obj, "filename", None)
-            if filename:
-                basename = os.path.basename(filename).lower()
-                if "label" in basename or "gt" in basename:
-                    label_image = image_obj
-                else:
-                    low_images.append(image_obj)
+    def _separate_sample(self, indices: List[int]) -> Tuple[List[int], int]:
+        low_indices: List[int] = []
+        label_idx: int | None = None
+        for i in indices:
+            img_obj = self.hf_dataset[i]["image"]
+            fname = getattr(img_obj, "filename", "")
+            base = os.path.basename(fname).lower() if fname else ""
+            if "gt" in base or "label" in base:
+                label_idx = i
             else:
-                low_images.append(image_obj)
-        return low_images, label_image
-
+                low_indices.append(i)
+        return low_indices, label_idx 
+    
+    def _prepare_samples(self) -> List[Dict[str, List[int]]]:
+        samples: List[Dict[str, List[int]]] = []
+        for idxs in self._group_by_sample().values():
+            lows, lbl = self._separate_sample(idxs)
+            if lbl is not None and lows:
+                samples.append({"low_idxs": lows, "label_idx": lbl})
+        return samples
+    
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> Tuple[List[torch.Tensor], torch.Tensor]:
-        sample = self.samples[idx]
-        low_images = sample["low_images"]
-        label_image = sample["label"]
+        grp = self.samples[idx]
+        low_idxs = grp["low_idxs"]
+        lbl_idx = grp["label_idx"]
 
-        if self.num_low == -1:
-            selected_low = low_images
-        elif len(low_images) > self.num_low:
-            selected_low = self.rng.sample(low_images, self.num_low)
+        # select up to num_low
+        if self.num_low != -1 and len(low_idxs) > self.num_low:
+            chosen = self.rng.sample(low_idxs, self.num_low)
         else:
-            selected_low = low_images
+            chosen = low_idxs
 
-        transformed_low = [self.transform(img) for img in selected_low]
-        transformed_label = self.transform(label_image)
+        # load + transform low images
+        lows: List[torch.Tensor] = []
+        for i in chosen:
+            img = self.hf_dataset[i]["image"]
+            if not isinstance(img, Image.Image):
+                img = Image.fromarray(img)
+            lows.append(self.transform(img))
 
-        return transformed_low, transformed_label
+        # load + transform label image
+        lbl_img = self.hf_dataset[lbl_idx]["image"]
+        if not isinstance(lbl_img, Image.Image):
+            lbl_img = Image.fromarray(lbl_img)
+        label = self.transform(lbl_img)
+
+        return lows, label
 
 def variable_low_images_collate(batch: List[Tuple[List[torch.Tensor], torch.Tensor]]) -> Tuple[torch.Tensor, torch.Tensor]:
     """
