@@ -74,6 +74,7 @@ def run_single_experiment(
         save_dir=save_dir,
         pretrain_content_ratio=current_exp_cfg.get('pretrain_content_ratio'),
         pretrain_ctdn_ratio=current_exp_cfg.get('pretrain_ctdn_ratio'),
+        gradnorm_alpha=5,
     )
 
     _, metrics = trainer.train()
