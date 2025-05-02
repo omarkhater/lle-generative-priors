@@ -164,6 +164,7 @@ cython_debug/
 # ignore EDA helpers, experiment outputs, and results
 eda/
 outputs/
-experiments/results/
+experiments/artifacts/
 trained_models/
 /docs
+models/

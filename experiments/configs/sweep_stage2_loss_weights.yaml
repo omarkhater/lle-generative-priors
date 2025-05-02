@@ -1,6 +1,6 @@
 base:
-  experiment_name: "stage2_top_models_sweep"
-  num_epochs: 100
+  experiment_name: "stage2_best_adaptive_grad"
+  num_epochs: 2
   device: "cuda"
   dataset_name: "SICE_paired"
   dataset_id: "okhater/SICE"
@@ -9,15 +9,15 @@ base:
   learning_rate: 1e-4
   weight_decay: 1e-4
   patience: 3
-  val_frequency: 5
+  val_frequency: 1
   use_scheduler: true
   scheduler_gamma: 0.8
-  num_diffusion_timesteps: 1000
-  num_sampling_timesteps: 50
+  num_diffusion_timesteps: 10
+  num_sampling_timesteps: 2
   stage1_model_selection:
-    metric: "niqe"
-    top_k: 3
-    experiment_name: "stage1_loss_weights_sweep"
+    metric: "val/lower_is_better/niqe"
+    top_k: 1
+    experiment_name: "stage1_adaptive_grad_norm_pilot"
     higher_is_better: false
   latent_space_dim: 64
 

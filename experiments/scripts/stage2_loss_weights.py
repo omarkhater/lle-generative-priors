@@ -107,19 +107,14 @@ def run_experiment_with_model(
         # Log parameters
         params = {**config, **sweep_params, 'stage1_model_id': stage1_model_id}
         log_dict_as_params(params)
-        
-        # Create optimizer and scheduler
         optimizer = get_optimizer(
             stage2_model,
             lr=float(config['learning_rate']),
             weight_decay=float(config['weight_decay'])
         )
-        
         scheduler = None
         if config.get('use_scheduler', False):
             scheduler = get_scheduler(optimizer, gamma=config['scheduler_gamma'])
-        
-        # Create trainer
         num_diffusion_steps = config['num_diffusion_timesteps']
         trainer = Stage2Trainer(
             model=model,
@@ -138,64 +133,16 @@ def run_experiment_with_model(
             gamma=sweep_params['gamma'],
             save_visualization_dir=os.path.join("outputs", "visualizations", run_name),
         )
-        best_model, metrics = trainer.train()
-        
-        # Log metrics
-        mlflow.log_metric("best_val_loss", metrics['best_loss'])
-        mlflow.log_metric("best_epoch", metrics['best_epoch'])
-        
-        for i, loss in enumerate(metrics['train_losses']):
-            mlflow.log_metric("losses/train", float(loss), step=i)
+        _, _ = trainer.train()
+        test_metrics = evaluate_stage2_metrics_avgfirst(model, dataloaders['test'])
+        trainer._log_evaluation_metrics(test_metrics, prefix ="test")    
 
-        val_steps = [j * config['val_frequency'] for j in range(len(metrics['val_losses']))]
-        for step, vloss in zip(val_steps, metrics['val_losses']):
-            mlflow.log_metric("losses/val", float(vloss), step=step)
-
-        higher = {"psnr", "ssim"}
-        lower  = {"tv_illumination", "pi", "niqe", "lpips"}
-        if hasattr(trainer, "all_val_metrics"):
-            for epoch_idx, vm in enumerate(trainer.all_val_metrics):
-                for name, val in vm.items():
-                    if name in higher:
-                        key = f"higher_is_better/val/{name}"
-                    elif name in lower:
-                        key = f"lower_is_better/val/{name}"
-                    else:
-                        key = f"val/{name}"
-                    mlflow.log_metric(key, float(val), step=epoch_idx)
-
-
-        # Evaluate on test set
-        test_metrics = evaluate_stage2_metrics_avgfirst(best_model, dataloaders['test'])
-        for name, val in test_metrics.items():
-            if name in higher:
-                key = f"higher_is_better/test/{name}"
-            elif name in lower:
-                key = f"lower_is_better/test/{name}"
-            else:
-                key = f"test/{name}"
-            mlflow.log_metric(key, float(val))
-        
-        # Visualize results
-        vis_dir = os.path.join("outputs", "visualizations", run_name)
-        visualize_and_save_samples(best_model, dataloaders['val'], vis_dir)
-        mlflow.log_artifacts(vis_dir, "visualizations")
-        
-        # Save model
         model_dir = os.path.join("outputs", "models", run_name)
         os.makedirs(model_dir, exist_ok=True)
         model_path = os.path.join(model_dir, "lighten_diffusion_model.pth")
-        torch.save(best_model.state_dict(), model_path)
+        torch.save(model.state_dict(), model_path)
         mlflow.log_artifact(model_path, "model")
-        
-        # Upload to S3 if configured
-        if s3_bucket:
-            s3_prefix = f"experiments/{config['experiment_name']}/{run_name}"
-            upload_file_to_s3(model_path, s3_bucket, f"{s3_prefix}/model.pth")
-            upload_directory_to_s3(vis_dir, s3_bucket, f"{s3_prefix}/visualizations")
-            
-        # Log PyTorch model
-        mlflow.pytorch.log_model(best_model, "pytorch_model")
+        mlflow.pytorch.log_model(model, "pytorch_model")
 
 def main():
     parser = argparse.ArgumentParser(description="Run Stage2 experiment with loss weight sweep")
