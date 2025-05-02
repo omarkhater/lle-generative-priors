@@ -1,12 +1,43 @@
 from .base import BaseTrainer
 import torch
 from .tqdm_configuration import TqdmManager
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, Any, List
 from torch.utils.data import DataLoader
 from .losses import noise_loss, self_constrained_consistency_loss
 from frameworks.LightenDiffusion.visualization.visualize_stage2 import visualize_stage2_results
 import logging, os
+import mlflow
+import numpy as np
 from evaluation.lighten_diffusion_stage2 import evaluate_stage2_metrics_avgfirst
+import torch.nn as nn
+import functools
+
+LOSS_REGISTRY = {
+    "diffusion_loss": {
+        "fn": noise_loss,
+        "inputs": {
+            "predicted_noise": "pred_noise", 
+            "noise_target": "true_noise"
+            },
+        },
+    "scc_loss": {
+        "fn": self_constrained_consistency_loss,
+        "inputs": {
+            "f_low_hat": "restored_features",
+            "f_low": "reference_feature"
+        }
+    }
+}
+LOGW_CLAMP_MIN, LOGW_CLAMP_MAX = -10.0, 10.0
+EPS = 1e-8
+
+def with_curriculum(fn):
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        self._apply_curriculum(self.current_epoch)
+        return fn(self, *args, **kwargs)
+    return wrapper
+
 
 class Stage2Trainer(BaseTrainer):
     """
@@ -35,6 +66,8 @@ class Stage2Trainer(BaseTrainer):
     Total loss is computed as:
          total_loss = diffusion_loss + lambda_scc * scc_loss.
     """
+    higher_is_better = {"psnr", "ssim"}
+    lower_is_better = {"tv_illumination", "pi", "niqe", "lpips"}
     def __init__(self,
                  model: torch.nn.Module,
                  train_loader: DataLoader,
@@ -54,20 +87,71 @@ class Stage2Trainer(BaseTrainer):
                  random_seed: int = 42,
                  after_validate: bool = True,
                  save_visualization_dir: Optional[str] = None,
+                 gradnorm_alpha: float = 1.5,
+                 gradnorm_interval: int = 3,
+                 scc_patience: int = 5,
+                 scc_ramp_length: int = 5,
+                 curriculum_keys: List[str] = None,
 
                  ) -> None:
-        super().__init__(model, train_loader, val_loader, optimizer, device,
-                         scheduler, num_epochs, val_frequency, patience)
+        super().__init__(
+            model, 
+            train_loader, 
+            val_loader, 
+            optimizer, 
+            device,
+            scheduler, 
+            num_epochs, 
+            val_frequency, 
+            patience,
+            curriculum_keys=curriculum_keys or ["diffusion_loss"]
+            )
+        
+        # configurations
         self.lambda_scc = lambda_scc
-        self.betas = betas
-        self.num_diffusion_timesteps = num_diffusion_timesteps
-        self.num_sampling_timesteps = num_sampling_timesteps
         self.gamma = gamma
         self.num_visualization = num_visualization
         self.random_seed = random_seed
+        self.save_visualization_dir = save_visualization_dir
+
+        # gradnorm 
+        self.log_weights = nn.ParameterDict({
+            name: nn.Parameter(torch.zeros(()))
+            for name in LOSS_REGISTRY
+        })
+        self.initial_raw_losses  = {name: None for name in LOSS_REGISTRY}
+        self.gradnorm_alpha = gradnorm_alpha
+        self.gradnorm_interval = gradnorm_interval
+        self.weight_optimizer = torch.optim.Adam(
+            self.log_weights.values(),
+            lr=self.optimizer.param_groups[0]["lr"] * 0.5,
+            betas=(0.9, 0.999)
+        )
+
+        self.betas = betas
+        self.num_diffusion_timesteps = num_diffusion_timesteps
+        self.num_sampling_timesteps = num_sampling_timesteps
+        
+        # curriculum state for SCC ramp
+        self.scc_patience = scc_patience
+        self.scc_ramp_length = scc_ramp_length
+        self.ramp_started = False
+        self.ramp_epoch = None
+
         self.after_validate = after_validate
         self.all_val_metrics = []
-        self.save_visualization_dir = save_visualization_dir
+        self.best_diff_loss = float('inf')
+        self.diff_plateau_cnt = 0
+
+        self.current_epoch = 0
+        self.best_loss = float('inf')
+        
+        self.initial_weighted_losses = {name: None for name in LOSS_REGISTRY}
+        self.initial_total_loss = None
+        self.curriculum_keys = curriculum_keys
+        self._batch_counter = 0
+        
+        
         self._validate_dimensions(train_loader, "train_loader")
         self._validate_dimensions(val_loader, "val_loader")
         self._validate_model_format()
@@ -164,6 +248,28 @@ class Stage2Trainer(BaseTrainer):
         if missing_stage1_low:
             raise ValueError(f"Stage1_low sub-dictionary is missing keys: {missing_stage1_low}")
 
+    def _apply_curriculum(self, epoch: int) -> None:
+        """
+        Applies a curriculum learning strategy to the loss weights.
+        The diffusion loss weight is ramped up from a small value to 1.0 over a specified number of epochs.
+        The SCC loss weight is ramped down from 1.0 to a small value over the same number of epochs.
+        Args:
+            epoch (int): The current epoch number.
+        
+        Returns:
+            None
+        """
+        self.log_weights['diffusion_loss'].data.fill_(0.0)
+
+        if not self.ramp_started:
+            fill = np.log(EPS)
+        else:
+            it = epoch - self.ramp_epoch
+            frac = min(1.0, max(0.0, it / self.ramp_length))
+            fill = np.log(frac + EPS)
+        self.log_weights['scc_loss'].data.fill_(fill)
+
+
     def calculate_loss(
         self,
         restored_features,
@@ -183,61 +289,194 @@ class Stage2Trainer(BaseTrainer):
         Returns:
             tuple: (total_loss, diffusion_loss, scc_loss)
         """
-        scc_loss = self_constrained_consistency_loss(
-            restored_features, 
-            reference_feature
-        )
-        diffusion_loss = noise_loss(pred_noise, true_noise) 
-        total_loss =  diffusion_loss + self.lambda_scc * scc_loss
-        return total_loss, diffusion_loss, scc_loss
+        
+        weighted_losses = {}
+        raw_losses = {}
+        inputs = {
+            "restored_features": restored_features,
+            "reference_feature": reference_feature,
+            "pred_noise": pred_noise,
+            "true_noise": true_noise
+        }
 
-    def train_epoch(self) -> float:
+        for name, info in LOSS_REGISTRY.items():
+            fn = info["fn"]
+            mapping = info["inputs"]
+            kwargs = {}
+            for param, src in mapping.items():
+                if src not in inputs:
+                    raise KeyError(f"LOSS_REGISTRY[{name}]: expected input '{src}' but it's missing")
+                kwargs[param] = inputs[src]
+            raw_losses[name] = fn(**kwargs)
+
+        for name, raw in raw_losses.items():
+            w = torch.exp(self.log_weights[name])
+            weighted_losses[name] = w * raw 
+        loss_total = sum(weighted_losses.values())
+        return loss_total, raw_losses, weighted_losses
+    @with_curriculum
+    def train_epoch(self) -> Dict[str, float]:
         """
         Train for one epoch over the training data.
 
         Returns:
-            float: Average loss over the epoch.
+            Dict[str, float]: A dict containing metrics for this epoch.
         """
         self.model.train()
-        running_loss = 0.0
-        running_scc_loss = 0.0
-        running_diffusion_loss = 0.0
-        batch_bar = TqdmManager(
+        self.current_epoch += 1
+        self._batch_counter = 0
+        batch_bar = self._make_tqdm()
+        running_total, running_raw, running_weighted = self._init_running_stats()
+
+        for i, batch in enumerate(self.train_loader):
+            loss_total, raw_losses, weighted_losses = self._process_batch(batch)
+            running_total, running_raw, running_weighted = self._accumulate_stats(
+                running_total, running_raw, running_weighted,
+                loss_total, raw_losses, weighted_losses
+            )
+            self._update_progress(batch_bar, running_total, running_weighted, i)
+
+        batch_bar.close()
+        return self._finalize_metrics(running_total, running_raw, running_weighted)
+
+    def _make_tqdm(self) -> TqdmManager:
+        """Create the batch progress bar."""
+        return TqdmManager(
             total=len(self.train_loader), 
             desc="Training Batches", 
             leave=True,
-            unit = "batch",
+            unit="batch",
         )
-        for i, batch_data in enumerate(self.train_loader):
-            batch_data = self.ensure_on_device(batch_data)
-            low_imgs, high_imgs = batch_data
-            loss_tesnors = self._gather_tensors(low_imgs, high_imgs)
-            total_loss, diffusion_loss, scc_loss = self.calculate_loss(*loss_tesnors)
-            self.optimizer.zero_grad()
-            total_loss.backward()
-            self.optimizer.step()
-            running_loss += total_loss.item()
-            running_scc_loss += scc_loss.item()
-            running_diffusion_loss += diffusion_loss.item()
-            avg_total_loss = running_loss / (i + 1)
-            avg_scc_loss = running_scc_loss / (i + 1)
-            avg_diffusion_loss = running_diffusion_loss / (i + 1)
-            avg_weighted_scc_loss = self.lambda_scc * avg_scc_loss
-            batch_bar.set_postfix(
-                total_loss=f"{avg_total_loss:.4f}",
-                diffusion_loss=f"{avg_diffusion_loss:.4f}",
-                weighted_scc_loss=f"{avg_weighted_scc_loss:.4f}"
-            )
-            batch_bar.update(1)
-        batch_bar.close()
-        return {
-            "total_loss": avg_total_loss,
-            "diffusion_loss": avg_diffusion_loss,
-            "scc_loss": avg_scc_loss,
-            "weighted_scc_loss": avg_weighted_scc_loss
-        }
 
-    def validate_batch(self, batch: Tuple[torch.Tensor, torch.Tensor]) -> float:
+    def _init_running_stats(self) -> Dict[str, float]:
+        """ Initialize running stats for the epoch.
+        Args:
+            None
+        Returns:
+            running_total (float): Running total loss.
+            running_raw (dict): Running raw losses.
+            running_weighted (dict): Running weighted losses.
+        """
+        running_total = 0.0
+        running_raw = {name: 0.0 for name in LOSS_REGISTRY}
+        running_weighted = {name: 0.0 for name in LOSS_REGISTRY}
+        return running_total, running_raw, running_weighted
+
+    def _process_batch(
+            self, 
+            batch: tuple
+        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Process a single batch through forward and backward passes.
+
+        Args:
+            batch: Tuple of (low_imgs, high_imgs)
+
+        Returns:
+            Tuple of (total_loss, diffusion_loss, scc_loss)
+        """
+        low_imgs, high_imgs = self.ensure_on_device(batch)
+        self._batch_counter += 1
+        restored, reference, pred_noise, true_noise = self._gather_tensors(
+            low_imgs, high_imgs)
+        loss_total, raw_losses, weighted_losses = self.calculate_loss(
+            restored, reference, pred_noise, true_noise)
+        self.optimizer.zero_grad()
+        self.weight_optimizer.zero_grad()
+        loss_total.backward(retain_graph=True)
+        gradnorm_loss = self._maybe_gradnorm(raw_losses)
+        gradnorm_loss.backward()
+        self.optimizer.step()
+        self.weight_optimizer.step()
+        self._clamp_log_weights()
+        self._log_gradient_stats()
+        return loss_total, raw_losses, weighted_losses
+
+    def _accumulate_stats(
+        self,
+        running_total: float,
+        running_raw: Dict[str, float],
+        running_weighted: Dict[str, float],
+        loss_total: torch.Tensor,
+        raw_losses: Dict[str, torch.Tensor],
+        weighted_losses: Dict[str, torch.Tensor]
+    ) -> Tuple[float, Dict[str, float], Dict[str, float]]:
+        """
+        Accumulate stats for the current batch.
+        
+        Args:
+            running_total (float): Running total loss.
+            running_raw (dict): Running raw losses.
+            running_weighted (dict): Running weighted losses.
+            loss_total (torch.Tensor): Total loss for the current batch.
+            raw_losses (dict): Raw losses for the current batch.
+            weighted_losses (dict): Weighted losses for the current batch.
+        Returns:
+            running_total (float): Updated running total loss.
+            running_raw (dict): Updated running raw losses.
+            running_weighted (dict): Updated running weighted losses.
+        """
+        running_total += loss_total.item()
+        for name in LOSS_REGISTRY:
+            running_raw[name] += raw_losses[name].item()
+            running_weighted[name] += weighted_losses[name].item()
+        return running_total, running_raw, running_weighted
+
+    def _update_progress(
+        self,
+        batch_bar: TqdmManager,
+        running_total: float,
+        running_weighted: Dict[str, float],
+        batch_idx: int
+    ) -> None:
+        """
+        Update the progress bar with current metrics.
+
+        Args:
+            batch_bar (TqdmManager): The progress bar instance.
+            running_total (float): Running total loss.
+            running_weighted (dict): Running weighted losses.
+            batch_idx (int): Current batch index.
+        
+        Returns:
+            None
+        """
+        avg_total = running_total / (batch_idx + 1)
+        postfix = {"total": f"{avg_total:.4f}"}
+        for name in LOSS_REGISTRY:
+            avg_w = running_weighted[name] / (batch_idx + 1)
+            postfix[f"weighted_{name}"] = f"{avg_w:.4f}"
+        batch_bar.set_postfix(**postfix)
+        batch_bar.update(1)
+
+    def _finalize_metrics(
+        self,
+        running_total: float,
+        running_raw: Dict[str, float],
+        running_weighted: Dict[str, float]
+    ) -> Dict[str, float]:
+        """
+        Finalize metrics for the epoch.
+
+        Args:
+            running_total (float): Running total loss.
+            running_raw (dict): Running raw losses.
+            running_weighted (dict): Running weighted losses.
+        Returns:
+            metrics (dict): Finalized metrics for the epoch.
+        """
+
+        N = len(self.train_loader)
+        metrics = {"total_loss": running_total / N}
+        for name in LOSS_REGISTRY:
+            metrics[f"raw_{name}"] = running_raw[name] / N
+            metrics[f"weighted_{name}"] = running_weighted[name] / N
+        return metrics
+
+    def validate_batch(
+            self, 
+            batch: Tuple[torch.Tensor, torch.Tensor]
+        ) -> Dict[str, Any]:
         """
         Process and compute loss for a single validation batch.
 
@@ -245,34 +484,56 @@ class Stage2Trainer(BaseTrainer):
             batch (tuple): A tuple containing (low_imgs, high_imgs).
 
         Returns:
-            float: The computed loss for the validation batch.
+            Dict[str,Any]: Must include 'total_loss' and 'raw_losses' per BaseTrainer.
         """
         low_imgs, high_imgs = batch
-        loss_tensors = self._gather_tensors(low_imgs, high_imgs)
-        total_loss, _, _ = self.calculate_loss(*loss_tensors)
-        return total_loss
+        total_loss, diffusion_loss, scc_loss = self.calculate_loss(
+            *self._gather_tensors(low_imgs, high_imgs)
+        )
+        raw_losses = {
+            "diffusion_loss": diffusion_loss,
+            "scc_loss": scc_loss
+        }
+        return {
+            "total_loss": total_loss,
+            "raw_losses": raw_losses
+        }
 
-    def after_validation(self, epoch: int) -> None:
-
+    @with_curriculum
+    def after_validation(self, current_epoch: int) -> None:
         """
-        Hook method to execute after the validation loop.
-        This implementation visualizes Stage2 results.
-        """
-        if self.after_validate:
-            val_metrics = evaluate_stage2_metrics_avgfirst(self.model, self.val_loader)
-            self.all_val_metrics.append(val_metrics)
+        Hook method called after validation. 
+        This method evaluates the model on the validation set and logs the metrics.
 
-            if self.num_visualization:
-                save_dir = os.path.join(self.save_visualization_dir, f"epoch_{epoch}")
-                os.makedirs(save_dir, exist_ok=True)
-                visualize_stage2_results(
-                    self.model, 
-                    self.val_loader, 
-                    num_samples=self.num_visualization, 
-                    random_seed=self.random_seed,
-                    save_dir=self.save_visualization_dir
-                )
-    
+        Args:
+            current_epoch (int): The current epoch number.
+        Returns: 
+            None
+        """
+        val_metrics = evaluate_stage2_metrics_avgfirst(self.model, self.val_loader)
+        self.all_val_metrics.append(val_metrics)
+        self._log_evaluation_metrics(val_metrics, prefix="val")
+        avg_diff = self._avg_val_raws.get("diffusion_loss", float("nan"))
+        if avg_diff < self.best_diff_loss:
+            self.best_diff_loss = avg_diff
+            self.diff_plateau_cnt = 0
+        else:
+            self.diff_plateau_cnt += 1
+        if not self.ramp_started and self.diff_plateau_cnt >= self.scc_patience:
+            self.ramp_started = True
+            self.ramp_epoch = current_epoch
+
+        if self.num_visualization and self.save_visualization_dir:
+            save_dir = os.path.join(self.save_visualization_dir, f"epoch_{current_epoch}")
+            os.makedirs(save_dir, exist_ok=True)
+            visualize_stage2_results(
+                self.model,
+                self.val_loader,
+                num_samples=self.num_visualization,
+                random_seed=self.random_seed,
+                save_dir=save_dir
+            )
+            
 
     def _gather_tensors(
             self, 
@@ -311,3 +572,108 @@ class Stage2Trainer(BaseTrainer):
             pred_noise, 
             true_noise
         )
+
+    def after_training(self) -> None:
+        """
+        Hook method called after training is complete.
+        Log best_val_loss / best_val_epoch and save model via MLflow.
+        """
+        train_metrics = evaluate_stage2_metrics_avgfirst(
+            self.model, 
+            self.train_loader
+        )
+        self._log_evaluation_metrics(train_metrics, prefix="train")
+
+        local_path = f"{self.save_dir}/model/best_model.pth" if self.save_dir else None
+        self.save_pytorch_model(self.best_state, local_path)
+        if mlflow.active_run():
+            mlflow.log_artifact(local_path )
+            mlflow.log_metric("best_val_loss", self.best_loss)
+            mlflow.log_metric("best_val_epoch", self.best_epoch)
+            mlflow.pytorch.log_model(self.model, "model")
+        return
+    
+    @staticmethod
+    def _log_evaluation_metrics(metrics: dict, prefix: str = "val") -> None:
+        """
+        Log evaluation metrics to mlflow.
+        
+        Args:
+            metrics (dict): Dictionary of evaluation metrics.
+            prefix (str): Prefix for the metric names.
+        """
+        for name, val in metrics.items():
+            if name in Stage2Trainer.higher_is_better:
+                key = f"{prefix}/higher_is_better/{name}"
+            elif name in Stage2Trainer.lower_is_better:
+                key = f"{prefix}/lower_is_better/{name}"
+            else:
+                key = f"{prefix}/{name}"
+            mlflow.log_metric(key, float(val))
+
+    def _log_gradient_stats(self) -> None:
+        """
+        Log gradient norms for each top-level submodule of the Stage2 model.
+        """
+        stats = {}
+        for name, module in self.model.named_children():
+            norms = [p.grad.norm().item() for p in module.parameters() if p.grad is not None]
+            stats[f"grad/{name}/mean"] = float(np.mean(norms)) if norms else 0.0
+            stats[f"grad/{name}/min"]  = float(np.min(norms)) if norms else 0.0
+            stats[f"grad/{name}/max"]  = float(np.max(norms)) if norms else 0.0
+        if mlflow.active_run():
+            mlflow.log_metrics(stats)
+
+    def _maybe_gradnorm(self, raw_losses: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Compute the gradient norm loss if the current batch is a multiple of gradnorm_interval.
+        Args:
+            raw_losses (dict): Dictionary of raw losses.
+        Returns:
+            torch.Tensor: Gradient norm loss.
+        """
+        if self._batch_counter % self.gradnorm_interval != 0:
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+        return self._gradnorm_step(raw_losses)
+    
+    def _gradnorm_step(self, raw_losses: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Compute the gradient norm loss based on the raw losses.
+        
+        Args:
+            raw_losses (dict): Dictionary of raw losses.
+        
+        Returns:
+            torch.Tensor: Gradient norm loss.
+        """
+        for name, raw in raw_losses.items():
+            if self.initial_raw_losses[name] is None:
+                self.initial_raw_losses[name] = raw.detach().item()
+        shared = [p for p in self.model.parameters() if p.requires_grad]
+        grads = {}
+        for name, raw in raw_losses.items():
+            lw = torch.clamp(self.log_weights[name], LOGW_CLAMP_MIN, LOGW_CLAMP_MAX)
+            g = torch.autograd.grad(
+                torch.exp(lw) * raw,
+                shared,
+                retain_graph=True,
+                create_graph=True,
+                grad_outputs=[torch.ones_like(raw)]
+            )
+            norms = [t.abs().mean() for t in g if t is not None]
+            grads[name] = torch.stack(norms).mean() if norms else torch.tensor(0.)
+        rates = {name: (raw_losses[name].detach() / self.initial_raw_losses[name] + EPS) ** self.gradnorm_alpha
+                 for name in raw_losses}
+        C = sum(grads.values()).detach() / len(grads)
+        targets = {name: C * rates[name] for name in grads}
+        loss = sum((grads[name] - targets[name]) ** 2 for name in grads)
+        if mlflow.active_run():
+            mlflow.log_metric("gradnorm_loss", loss.item(), step=self.current_epoch)
+        return loss
+    
+    def _clamp_log_weights(self) -> None:
+        """
+        Clamp the log weights to a specified range.
+        """
+        for log_w in self.log_weights.values():
+            log_w.data.clamp_(LOGW_CLAMP_MIN, LOGW_CLAMP_MAX)
