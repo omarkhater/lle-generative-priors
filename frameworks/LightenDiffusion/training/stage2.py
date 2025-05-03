@@ -78,7 +78,6 @@ class Stage2Trainer(BaseTrainer):
                  num_epochs: int = 100,
                  val_frequency: int = 5,
                  patience: int = 5,
-                 lambda_scc: float = 0.001,
                  betas: torch.Tensor = None,
                  num_diffusion_timesteps: int = 1000,
                  num_sampling_timesteps: int = 50,
@@ -108,7 +107,6 @@ class Stage2Trainer(BaseTrainer):
         )
         
         # configurations
-        self.lambda_scc = lambda_scc
         self.gamma = gamma
         self.num_visualization = num_visualization
         self.random_seed = random_seed
@@ -487,15 +485,20 @@ class Stage2Trainer(BaseTrainer):
             Dict[str,Any]: Must include 'total_loss' and 'raw_losses' per BaseTrainer.
         """
         low_imgs, high_imgs = batch
-        total_loss, diffusion_loss, scc_loss = self.calculate_loss(
-            *self._gather_tensors(low_imgs, high_imgs)
+        restored_features, reference_feature, pred_noise, true_noise = self._gather_tensors(low_imgs, high_imgs)
+        loss_total, raw_losses, weighted_losses = self.calculate_loss(
+            restored_features,
+            reference_feature,
+            pred_noise,
+            true_noise
         )
+        # Ensure raw_losses contains tensor values, not dictionaries
         raw_losses = {
-            "diffusion_loss": diffusion_loss,
-            "scc_loss": scc_loss
+            "diffusion_loss": raw_losses["diffusion_loss"],
+            "scc_loss": raw_losses["scc_loss"]
         }
         return {
-            "total_loss": total_loss,
+            "total_loss": loss_total,
             "raw_losses": raw_losses
         }
 

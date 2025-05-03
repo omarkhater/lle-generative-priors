@@ -290,13 +290,16 @@ class BaseTrainer(ABC):
                 
                 for key, value in self._val_raws.items():
                     if key in raw_losses:
-                        self._val_raws[key].append(raw_losses[key].item())
+                        value_tensor = raw_losses[key]
+                        if not isinstance(value_tensor, torch.Tensor):
+                            raise ValueError(f"Raw loss for {key} must be a tensor")
+                        value.append(value_tensor.item())
                     else:
                         raise ValueError(f"Key {key} not found in raw_losses. Does calculate_loss return a key = {key} under raw_losses?")
         
         self._avg_val_raws = {
-        key: (sum(vals) / len(vals) if vals else float("nan"))
-        for key, vals in self._val_raws.items()
+            key: (sum(vals) / len(vals) if vals else float("nan"))
+            for key, vals in self._val_raws.items()
         }
         self.after_validation(current_epoch)
         
