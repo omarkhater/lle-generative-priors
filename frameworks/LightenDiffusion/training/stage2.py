@@ -91,7 +91,7 @@ class Stage2Trainer(BaseTrainer):
                  gradnorm_interval: int = 3,
                  scc_patience: int = 5,
                  scc_ramp_length: int = 5,
-                 curriculum_keys: List[str] = None,
+                 curriculum_keys: List[str] = ["diffusion_loss", "scc_loss"],
 
                  ) -> None:
         super().__init__(
@@ -104,8 +104,8 @@ class Stage2Trainer(BaseTrainer):
             num_epochs, 
             val_frequency, 
             patience,
-            curriculum_keys=curriculum_keys or ["diffusion_loss"]
-            )
+            curriculum_keys=curriculum_keys
+        )
         
         # configurations
         self.lambda_scc = lambda_scc
