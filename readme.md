@@ -77,6 +77,14 @@ The dataset used in this project is published [here](https://huggingface.co/data
 - `eda\Stage2_Training copy.ipynb`: Early training script for stage 2.
 - `eda\reproduce_results.ipynb`: Evaluate paper checkpoint on our dataloaders. Note that you might need to fork original paper codes and get their checkpoint from their [repo](https://github.com/JianghaiSCU/LightenDiffusion/tree/main).
 
+## Key Experiments files
+- `experiments\scripts\stage1_loss_weights.py`: used to run stage 1 curriculum learning experiments and earlier loss sweeps.
+- `experiments\scripts\stage1_loss_weights.py`: used to run stage 2  experiments.
+
+Both files have corresponding yaml files under `experiments\configs\sweep_stage1_loss_weights.yaml"` and `experiments\configs\sweep_stage2_loss_weights.yaml`. 
+
+Please note that these configs have changed over time to run multiple experiments. 
+
 ## Training
 
 The project uses MLflow for experiment tracking. Training can be launched using the experiment scripts in `experiments/scripts/`.
@@ -85,6 +93,11 @@ Example:
 ```bash
 python experiments/scripts/stage2_loss_weights.py --config experiments/configs/sweep_stage2_loss_weights.yaml
 ```
+
+## Note on project History
+
+We started by creating several EDA notebooks to explore different parts of the projects. Then, we switched to well-scoped python scripts for easier experiments running and training. Earlier notebooks might not work as the project codes evoloved over time. The Key EDA scripts mentioned above used frequently up to the end of the project, so they might be better maintained than others. 
+
 
 ## Configuration
 
